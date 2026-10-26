@@ -1,0 +1,9 @@
+ccswitchboard
+Copyright 2026 rknai22
+
+This product is derived from the Telegram channel plugin for Claude Code
+(anthropics/claude-plugins-official, external_plugins/telegram),
+Copyright Anthropic, PBC, licensed under the Apache License, Version 2.0.
+The tool interface, the channel notification format, text chunking and
+attachment handling follow that plugin; the broker/shim split, forum topics
+and the setup wizard are new.

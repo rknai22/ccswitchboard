@@ -1,0 +1,169 @@
+// === GRACE START_BLOCK: ccswitchboard_protocol ================================
+// MODULE_CONTRACT:
+//   Wire contract between the channel shim (one per Claude session) and the
+//   broker (the only holder of the bot token). NDJSON over TCP: one JSON
+//   object per line, UTF-8, '\n'-terminated.
+//   IN:  nothing — types and constants only; both sides import this file
+//        (broker: ../plugin/protocol.ts), so it lives inside the plugin dir,
+//        which Claude Code copies alone into its plugin cache.
+//   INV: the shim never names a chat or a thread — the broker addresses every
+//        send by the topic bound to the connection; edits and reactions are
+//        accepted only for message_ids the broker recorded for that topic.
+//   INV: files travel as bytes (base64) in both directions: shim and broker may
+//        live on different machines and never share a filesystem.
+
+export const PROTOCOL_VERSION = 1
+export const DEFAULT_BROKER = '127.0.0.1:2223'
+/** Telegram bot upload/download caps; checked on both sides. */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+export const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+export const MAX_TEXT_CHUNK = 4096
+
+export type TopicTools = 'reply' | 'react' | 'edit_message' | 'download_attachment'
+export type GeneralTools = 'create_topic' | 'forward'
+export type SetupTools = 'setup_token' | 'setup_status' | 'reset'
+export type ToolName = TopicTools | GeneralTools | SetupTools
+
+// ---- handshake ---------------------------------------------------------------
+
+/** First line from the shim. No key = setup mode (only SetupTools allowed). */
+export type Hello = { t: 'hello'; v: typeof PROTOCOL_VERSION; key?: string }
+
+/** Broker answer to hello. `tools` is what this connection may call. */
+export type Welcome = {
+  t: 'welcome'
+  mode: 'topic' | 'setup'
+  /** Topic name (e.g. "general", "wms"); absent in setup mode. */
+  topic?: string
+  tools: ToolName[]
+}
+
+/** Broker refuses the connection and closes it (bad key, closed topic, version). */
+export type Reject = { t: 'reject'; reason: string }
+
+// ---- inbound messages --------------------------------------------------------
+
+export type Attachment = {
+  kind: 'photo' | 'document' | 'voice' | 'audio' | 'video' | 'video_note' | 'sticker'
+  file_id: string
+  size?: number
+  mime?: string
+  /** Uploader-controlled: broker strips <>[]\r\n; before sending. */
+  name?: string
+}
+
+/** One owner message for this topic. Delivered at least once, in update_id order. */
+export type InboundEvent = {
+  t: 'event'
+  update_id: number
+  topic: string
+  message_id: number
+  user: string
+  user_id: string
+  /** ISO 8601 */
+  ts: string
+  text: string
+  attachment?: Attachment
+  /** Present when the general session forwarded the owner's words here. */
+  forwarded_from_general?: { message_id: number }
+  /** Present when the owner quote-replied to an earlier message. */
+  reply_to?: { message_id: number; text?: string }
+}
+
+/** Shim confirms it handed the event to Claude; broker marks it delivered. */
+export type Ack = { t: 'ack'; update_id: number }
+
+/** Broker → shim: the binding is gone (topic closed/deleted, setup reset). */
+export type Unbound = { t: 'unbound'; reason: string }
+
+// ---- tool calls ----------------------------------------------------------------
+
+export type FilePayload = { name: string; data_b64: string }
+
+export type CallArgs = {
+  reply: { text: string; reply_to?: number; files?: FilePayload[]; format?: 'text' | 'markdownv2' }
+  react: { message_id: number; emoji: string }
+  edit_message: { message_id: number; text: string; format?: 'text' | 'markdownv2' }
+  download_attachment: { file_id: string }
+  /** General only. name: [a-z0-9-]{1,32}; title: shown in Telegram. */
+  create_topic: { name: string; title?: string }
+  /** General only. source_message_id must be an owner message in general. */
+  forward: { topic: string; source_message_id: number }
+  setup_token: { token: string }
+  setup_status: Record<string, never>
+  reset: Record<string, never>
+}
+
+export type CallResults = {
+  reply: { message_ids: number[] }
+  react: { ok: true }
+  edit_message: { message_id: number }
+  download_attachment: FilePayload & { mime?: string }
+  create_topic: { name: string; thread_id: number; cwd: string }
+  forward: { message_id: number }
+  setup_token: { bot_username: string }
+  setup_status: SetupStatus
+  reset: { sent: true }
+}
+
+export type SetupState = 'unconfigured' | 'waiting_chat' | 'waiting_button' | 'locked'
+
+export type SetupStatus = {
+  state: SetupState
+  bot_username?: string
+  chat_title?: string
+  /** Human hint for the wizard, e.g. "turn on topics in the group settings". */
+  hint?: string
+}
+
+export type Call<T extends ToolName = ToolName> = { t: 'call'; id: string; tool: T; args: CallArgs[T] }
+
+export type Result<T extends ToolName = ToolName> =
+  | { t: 'result'; id: string; ok: true; data: CallResults[T] }
+  | { t: 'result'; id: string; ok: false; error: string }
+
+export type ShimToBroker = Hello | Ack | Call
+export type BrokerToShim = Welcome | Reject | InboundEvent | Unbound | Result
+
+// ---- framing -------------------------------------------------------------------
+
+export function encode(msg: ShimToBroker | BrokerToShim): string {
+  return JSON.stringify(msg) + '\n'
+}
+
+/**
+ * Incremental NDJSON splitter. Feed raw chunks; returns complete parsed lines.
+ * Bad JSON lines are reported through onBad and skipped — one corrupt line must
+ * not kill a long-lived connection.
+ */
+export class LineDecoder {
+  private buf = ''
+  constructor(private onBad: (line: string, err: unknown) => void = () => {}) {}
+  push(chunk: string): unknown[] {
+    this.buf += chunk
+    const out: unknown[] = []
+    let i: number
+    while ((i = this.buf.indexOf('\n')) >= 0) {
+      const line = this.buf.slice(0, i)
+      this.buf = this.buf.slice(i + 1)
+      if (!line.trim()) continue
+      try {
+        out.push(JSON.parse(line))
+      } catch (e) {
+        this.onBad(line, e)
+      }
+    }
+    return out
+  }
+}
+
+export function parseBrokerAddr(s: string | undefined): { host: string; port: number } {
+  const v = (s ?? DEFAULT_BROKER).trim()
+  const i = v.lastIndexOf(':')
+  const port = Number(v.slice(i + 1))
+  if (i <= 0 || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`bad broker address: ${v} (want host:port)`)
+  }
+  return { host: v.slice(0, i), port }
+}
+// === GRACE END_BLOCK: ccswitchboard_protocol ==================================
