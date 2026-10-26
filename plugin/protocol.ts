@@ -137,15 +137,22 @@ export function encode(msg: ShimToBroker | BrokerToShim): string {
  * not kill a long-lived connection.
  */
 export class LineDecoder {
-  private buf = ''
+  // Partial line kept as pieces and searched chunk by chunk: a file payload
+  // is one line of tens of MB, and re-scanning (and re-flattening) the whole
+  // buffer on every 64 KB chunk would make it quadratic.
+  private parts: string[] = []
+  private size = 0
   constructor(private onBad: (line: string, err: unknown) => void = () => {}) {}
   push(chunk: string): unknown[] {
-    this.buf += chunk
     const out: unknown[] = []
+    let start = 0
     let i: number
-    while ((i = this.buf.indexOf('\n')) >= 0) {
-      const line = this.buf.slice(0, i)
-      this.buf = this.buf.slice(i + 1)
+    while ((i = chunk.indexOf('\n', start)) >= 0) {
+      this.parts.push(chunk.slice(start, i))
+      const line = this.parts.join('')
+      this.parts = []
+      this.size = 0
+      start = i + 1
       if (!line.trim()) continue
       try {
         out.push(JSON.parse(line))
@@ -153,7 +160,15 @@ export class LineDecoder {
         this.onBad(line, e)
       }
     }
+    if (start < chunk.length) {
+      this.parts.push(chunk.slice(start))
+      this.size += chunk.length - start
+    }
     return out
+  }
+  /** Characters buffered for the unfinished line — lets a reader cap it. */
+  get pending(): number {
+    return this.size
   }
 }
 
