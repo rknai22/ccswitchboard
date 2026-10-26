@@ -1,0 +1,14 @@
+{
+  "name": "ccswitchboard-broker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": { "ccswitchboard-broker": "src/main.ts" },
+  "scripts": {
+    "serve": "bun src/main.ts serve"
+  },
+  "dependencies": {
+    "grammy": "1.46.0"
+  }
+}

@@ -1,0 +1,432 @@
+// === GRACE START_BLOCK: broker_core ===========================================
+// MODULE_CONTRACT:
+//   IN:  Config; updates from the poller; tool calls from shim connections.
+//   OUT: the running broker: routes owner messages to topic queues, serves
+//        topic tools addressed by the connection's binding, runs setup, and
+//        hands everything else to modules through BrokerContext.
+//   INV: allowlist — only owner_id, only chat_id (+ the owner's private chat,
+//        which maps to "general"); anyone else is dropped without a reply.
+//   INV: a topic session can edit, react to or quote only messages recorded
+//        for its own topic; the shim never names a chat or a thread.
+//   INV: General vs topic is decided by is_topic_message, not by the presence
+//        of message_thread_id — Telegram also sets the latter on plain replies
+//        in General.
+
+import type { Update, Message } from 'grammy/types'
+import type { Attachment, ToolName } from '../../plugin/protocol.ts'
+import { ensureStateDir, readSecret, writeSecret, deleteSecret, type Config, type Secret } from './config.ts'
+import { log, type BrokerContext, type BrokerModule, type ConnInfo, type SendOpts } from './context.ts'
+import { modules as defaultModules } from './modules.ts'
+import { BrokerServer } from './server.ts'
+import { Setup } from './setup.ts'
+import { Store, type StoredEvent } from './store.ts'
+import { t } from './strings.ts'
+import { Telegram, describeError, type AllowedUpdate } from './telegram.ts'
+
+const ACK_REACTION = '👀'
+const CONFLICT_NOTICE_EVERY_MS = 3600_000
+
+// Filenames and titles are uploader-controlled and end up inside the session's
+// <channel> tag — delimiter chars would let them break out (as upstream).
+export function safeName(s: string | undefined): string | undefined {
+  return s?.replace(/[<>\[\]\r\n;]/g, '_')
+}
+
+export class Broker {
+  readonly store: Store
+  readonly tg: Telegram
+  readonly server: BrokerServer
+  readonly setup: Setup
+  private sec: Secret | null
+  private timers: ReturnType<typeof setInterval>[] = []
+  private base: BrokerContext
+
+  constructor(readonly cfg: Config, private mods: BrokerModule[] = defaultModules) {
+    ensureStateDir(cfg)
+    this.store = new Store(cfg.state_dir)
+    this.sec = readSecret(cfg)
+    this.tg = new Telegram(cfg, this.store, {
+      onUpdate: u => this.handleUpdate(u),
+      onConflict: d => this.onConflict(d),
+      allowedUpdates: (): AllowedUpdate[] =>
+        this.isLocked() ? ['message', 'callback_query', 'my_chat_member'] : ['my_chat_member', 'callback_query'],
+    })
+    this.server = new BrokerServer({
+      store: this.store,
+      isLocked: () => this.isLocked(),
+      handle: (tool, args, conn) => this.handleTool(tool, args, conn),
+    })
+    this.setup = new Setup({
+      cfg,
+      store: this.store,
+      tg: this.tg,
+      secret: () => this.sec,
+      saveSecret: s => this.saveSecret(s),
+      sendGeneral: async (text, markup) => (await this.sendTopic('general', text, { reply_markup: markup }))[0]!,
+      onLocked: () => this.runLocked(),
+      onReset: () => this.server.unbindAll('setup was reset'),
+    })
+    this.base = {
+      config: cfg,
+      store: this.store,
+      tg: {
+        send: (topic, text, opts) => this.sendTopic(topic, text, opts),
+        call: (fn, opts) => {
+          const chat = this.sec?.chat_id
+          if (!this.isLocked() || chat === undefined) return Promise.reject(new Error('broker is not configured'))
+          return this.tg.enqueue(chat, opts?.message ?? false, fn)
+        },
+        api: () => this.tg.api(),
+      },
+      enqueueEvent: (topic, ev) => {
+        const full = this.store.enqueueLocal({ ...ev, topic })
+        this.server.push(full)
+        return full
+      },
+      notifyGeneral: text => this.notifyGeneral(text),
+      log: (ev, f) => log('module', ev, f),
+      isLocked: () => this.isLocked(),
+      owner: () => (this.isLocked() ? { owner_id: this.sec!.owner_id!, chat_id: this.sec!.chat_id! } : null),
+      unbind: (topic, reason) => this.server.unbind(topic, reason),
+    }
+  }
+
+  private ctxFor(m: BrokerModule): BrokerContext {
+    return { ...this.base, log: (ev, f) => log(m.name, ev, f) }
+  }
+
+  isLocked(): boolean {
+    return !!this.sec?.locked && this.sec.owner_id !== undefined && this.sec.chat_id !== undefined
+  }
+
+  async start(): Promise<void> {
+    await this.server.listen(this.cfg.listen)
+    for (const m of this.mods) {
+      try {
+        await m.start?.(this.ctxFor(m))
+      } catch (e) {
+        log('core', 'module_start_failed', { module: m.name, err: describeError(e) })
+      }
+    }
+    this.setup.start()
+    if (this.sec) {
+      this.tg.setToken(this.sec.bot_token)
+      this.tg.startPolling()
+    }
+    log('core', 'started', { state: this.setup.state(), modules: this.mods.length })
+    this.timers.push(setInterval(() => this.store.prune(), 3600_000))
+    // The CLI `reset` runs in another process: notice its work within seconds.
+    this.timers.push(setInterval(() => this.reconcile(), 5_000))
+  }
+
+  stop(): void {
+    for (const tm of this.timers) clearInterval(tm)
+    this.setup.stop()
+    this.tg.stopPolling()
+    this.server.close()
+    this.store.close()
+  }
+
+  private saveSecret(s: Secret | null): void {
+    if (s) writeSecret(this.cfg, s)
+    else deleteSecret(this.cfg)
+    this.sec = s
+    this.tg.setToken(s?.bot_token ?? null)
+    if (s) this.tg.startPolling()
+  }
+
+  private reconcile(): void {
+    let disk: Secret | null
+    try {
+      disk = readSecret(this.cfg)
+    } catch (e) {
+      log('core', 'secret_unreadable', { err: describeError(e) })
+      return
+    }
+    if (!disk && this.sec) {
+      log('core', 'external_reset')
+      this.sec = null
+      this.tg.setToken(null)
+      this.server.unbindAll('setup was reset')
+    } else if (disk && (!this.sec || disk.bot_token !== this.sec.bot_token || disk.locked !== this.sec.locked)) {
+      log('core', 'secret_changed', { locked: disk.locked })
+      this.sec = disk
+      this.tg.setToken(disk.bot_token)
+      this.tg.startPolling()
+    }
+  }
+
+  private async runLocked(): Promise<void> {
+    for (const m of this.mods) {
+      try {
+        await m.onLocked?.(this.ctxFor(m))
+      } catch (e) {
+        log('core', 'module_onlocked_failed', { module: m.name, err: describeError(e) })
+      }
+    }
+  }
+
+  // ---- inbound -----------------------------------------------------------------
+
+  private async handleUpdate(u: Update): Promise<void> {
+    const botId = this.tg.botId()!
+    if (await this.setup.onUpdate(u)) {
+      this.store.setOffset(botId, u.update_id + 1)
+      return
+    }
+    if (u.message && this.isLocked()) {
+      const r = this.route(u.update_id, u.message)
+      if (r === 'drop') {
+        this.store.setOffset(botId, u.update_id + 1)
+        return
+      }
+      if (r) {
+        const fresh = this.store.ingest(botId, r.ev)
+        log('core', 'event', { update_id: u.update_id, topic: r.ev.topic, message_id: r.ev.message_id, len: r.ev.text.length, fresh })
+        if (fresh) {
+          this.server.push(r.ev)
+          this.ackFeedback(u.message, r.threadId)
+        }
+        return
+      }
+    }
+    for (const m of this.mods) {
+      if (!m.onUpdate) continue
+      try {
+        if (await m.onUpdate(u, this.ctxFor(m))) break
+      } catch (e) {
+        log('core', 'module_update_failed', { module: m.name, update_id: u.update_id, err: describeError(e) })
+      }
+    }
+    this.store.setOffset(botId, u.update_id + 1)
+  }
+
+  /**
+   * Owner content message → event for its topic; 'drop' for anything that must
+   * not reach a session; null for non-content messages (topic service events
+   * and the like), which go to modules.
+   */
+  private route(updateId: number, m: Message): { ev: StoredEvent; threadId: number | null } | 'drop' | null {
+    const s = this.sec!
+    const from = m.from
+    if (!from || from.id !== s.owner_id) {
+      log('core', 'drop_sender', { update_id: updateId, chat_id: m.chat.id })
+      return 'drop'
+    }
+    const dm = m.chat.type === 'private' && m.chat.id === s.owner_id
+    if (!dm && m.chat.id !== s.chat_id) {
+      log('core', 'drop_chat', { update_id: updateId, chat_id: m.chat.id })
+      return 'drop'
+    }
+    const content = contentOf(m)
+    if (!content) return null
+    let topic = 'general'
+    let threadId: number | null = null
+    if (!dm && m.is_topic_message && m.message_thread_id !== undefined) {
+      const row = this.store.topicByThread(m.message_thread_id)
+      if (!row) {
+        log('core', 'drop_unknown_thread', { update_id: updateId, thread_id: m.message_thread_id })
+        return 'drop'
+      }
+      topic = row.name
+      threadId = m.message_thread_id
+    }
+    const id = (n: number) => (dm ? -n : n)
+    const ev: StoredEvent = {
+      update_id: updateId,
+      topic,
+      message_id: id(m.message_id),
+      user: from.username ?? String(from.id),
+      user_id: String(from.id),
+      ts: new Date(m.date * 1000).toISOString(),
+      text: content.text,
+      ...(content.attachment ? { attachment: content.attachment } : {}),
+    }
+    const rt = m.reply_to_message
+    // Inside a topic every message "replies" to the topic's creation message;
+    // that is structure, not a quote.
+    if (rt && !rt.forum_topic_created && !(m.is_topic_message && rt.message_id === m.message_thread_id)) {
+      const quoted = rt.text ?? rt.caption
+      ev.reply_to = { message_id: id(rt.message_id), ...(quoted ? { text: quoted } : {}) }
+    }
+    return { ev, threadId }
+  }
+
+  /** 👀 and "typing…" as the official plugin does — fire and forget. */
+  private ackFeedback(m: Message, threadId: number | null): void {
+    const chat = m.chat.id
+    void this.tg.enqueue(chat, false, api =>
+      api.setMessageReaction(chat, m.message_id, [{ type: 'emoji', emoji: ACK_REACTION }]),
+    ).catch(e => log('core', 'ack_reaction_failed', { err: describeError(e) }))
+    void this.tg.enqueue(chat, false, api =>
+      api.sendChatAction(chat, 'typing', threadId !== null ? { message_thread_id: threadId } : {}),
+    ).catch(() => {})
+  }
+
+  private onConflict(description: string): void {
+    const api = this.tg.api()
+    // A webhook also blocks getUpdates with 409; ours is a polling bot, so a
+    // webhook can only be stale or planted — remove it.
+    if (/webhook/i.test(description) && api) {
+      void api.deleteWebhook().then(
+        () => log('tg', 'webhook_deleted'),
+        e => log('tg', 'webhook_delete_failed', { err: describeError(e) }),
+      )
+    }
+    if (!this.isLocked()) return
+    const last = Number(this.store.get('conflict_notice_at') ?? 0)
+    if (Date.now() - last < CONFLICT_NOTICE_EVERY_MS) return
+    this.store.set('conflict_notice_at', Date.now())
+    void this.notifyGeneral(t(this.cfg.lang, 'conflict_409'))
+  }
+
+  // ---- outbound ----------------------------------------------------------------
+
+  async notifyGeneral(text: string): Promise<void> {
+    if (!this.isLocked()) return
+    await this.sendTopic('general', text).catch(e => log('core', 'notify_failed', { err: describeError(e) }))
+  }
+
+  private ownMessage(topic: string, messageId: number): void {
+    const owner = this.store.topicOfMessage(messageId)
+    if (owner === undefined) throw new Error(`unknown message ${messageId} — not sent or received in this topic`)
+    if (owner !== topic) throw new Error('message belongs to another topic')
+  }
+
+  /** Chat that holds a (possibly negated, see store) message id. */
+  private chatOf(messageId: number): { chat: number; id: number } {
+    return messageId < 0 ? { chat: this.sec!.owner_id!, id: -messageId } : { chat: this.sec!.chat_id!, id: messageId }
+  }
+
+  async sendTopic(topic: string, text: string, opts: SendOpts = {}): Promise<number[]> {
+    if (!this.isLocked()) throw new Error('broker is not configured')
+    const row = this.store.topic(topic)
+    if (!row) throw new Error(`unknown topic ${topic}`)
+    let replyTo = opts.reply_to
+    if (replyTo !== undefined) {
+      this.ownMessage(topic, replyTo)
+      // A DM message cannot be quoted inside the group: send without a quote.
+      if (replyTo < 0) replyTo = undefined
+    }
+    if (!text && !(opts.files?.length)) throw new Error('empty reply: pass text or files')
+    const ids: number[] = []
+    try {
+      await this.tg.sendInto(row.chat_id, row.thread_id, text, {
+        ...opts,
+        reply_to: replyTo,
+        onSent: id => {
+          ids.push(id)
+          this.store.rememberMessage(id, topic)
+        },
+      })
+    } finally {
+      log('core', 'sent', { topic, messages: ids.length, len: text.length, files: opts.files?.length ?? 0 })
+    }
+    return ids
+  }
+
+  // ---- tools -------------------------------------------------------------------
+
+  private async handleTool(tool: ToolName, rawArgs: unknown, conn: ConnInfo): Promise<unknown> {
+    const a = (rawArgs ?? {}) as Record<string, unknown>
+    switch (tool) {
+      case 'setup_token': return this.setup.setupToken(a)
+      case 'setup_status': return this.setup.status()
+      case 'reset': return this.setup.reset()
+    }
+    const topic = conn.topic
+    if (conn.mode !== 'topic' || !topic) throw new Error('this connection is not bound to a topic')
+    switch (tool) {
+      case 'reply': {
+        if (typeof a.text !== 'string') throw new Error('reply: text must be a string')
+        const files = Array.isArray(a.files) ? (a.files as { name?: unknown; data_b64?: unknown }[]) : []
+        for (const f of files) {
+          if (typeof f?.name !== 'string' || typeof f.data_b64 !== 'string') throw new Error('reply: each file needs name and data_b64')
+        }
+        const message_ids = await this.sendTopic(topic, a.text, {
+          format: a.format === 'markdownv2' ? 'markdownv2' : 'text',
+          reply_to: a.reply_to !== undefined && a.reply_to !== null ? toId(a.reply_to, 'reply_to') : undefined,
+          files: files.map(f => ({ name: safeName(f.name as string)!, data_b64: f.data_b64 as string })),
+        })
+        return { message_ids }
+      }
+      case 'react': {
+        const mid = toId(a.message_id, 'message_id')
+        if (typeof a.emoji !== 'string' || !a.emoji) throw new Error('react: emoji must be a string')
+        this.ownMessage(topic, mid)
+        const { chat, id } = this.chatOf(mid)
+        await this.tg.enqueue(chat, false, api =>
+          api.setMessageReaction(chat, id, [{ type: 'emoji', emoji: a.emoji as never }]),
+        )
+        return { ok: true }
+      }
+      case 'edit_message': {
+        const mid = toId(a.message_id, 'message_id')
+        if (typeof a.text !== 'string' || !a.text) throw new Error('edit_message: text must be a non-empty string')
+        this.ownMessage(topic, mid)
+        const { chat, id } = this.chatOf(mid)
+        const parse = a.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
+        await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, a.text as string, parse))
+        return { message_id: mid }
+      }
+      case 'download_attachment': {
+        if (typeof a.file_id !== 'string' || !a.file_id) throw new Error('download_attachment: file_id must be a string')
+        return this.tg.download(a.file_id)
+      }
+    }
+    for (const m of this.mods) {
+      const h = m.tools?.[tool]
+      if (h) return h(a, conn, this.ctxFor(m))
+    }
+    throw new Error(`${tool}: not implemented yet`)
+  }
+}
+
+function toId(v: unknown, name: string): number {
+  const n = typeof v === 'string' ? Number(v) : v
+  if (typeof n !== 'number' || !Number.isInteger(n) || n === 0) throw new Error(`${name} must be a message id`)
+  return n
+}
+
+/** Text + attachment meta of a content message, as the official plugin reads
+ *  them; null for anything that is not owner content (service messages…). */
+function contentOf(m: Message): { text: string; attachment?: Attachment } | null {
+  const cap = m.caption
+  if (m.photo?.length) {
+    const best = m.photo[m.photo.length - 1]!
+    return { text: cap ?? '(photo)', attachment: { kind: 'photo', file_id: best.file_id, ...(best.file_size ? { size: best.file_size } : {}) } }
+  }
+  if (m.document) {
+    const name = safeName(m.document.file_name)
+    return {
+      text: cap ?? `(document: ${name ?? 'file'})`,
+      attachment: { kind: 'document', file_id: m.document.file_id, size: m.document.file_size, mime: m.document.mime_type, name },
+    }
+  }
+  if (m.voice) {
+    return { text: cap ?? '(voice message)', attachment: { kind: 'voice', file_id: m.voice.file_id, size: m.voice.file_size, mime: m.voice.mime_type } }
+  }
+  if (m.audio) {
+    const name = safeName(m.audio.file_name)
+    return {
+      text: cap ?? `(audio: ${safeName(m.audio.title) ?? name ?? 'audio'})`,
+      attachment: { kind: 'audio', file_id: m.audio.file_id, size: m.audio.file_size, mime: m.audio.mime_type, name },
+    }
+  }
+  if (m.video) {
+    return {
+      text: cap ?? '(video)',
+      attachment: { kind: 'video', file_id: m.video.file_id, size: m.video.file_size, mime: m.video.mime_type, name: safeName(m.video.file_name) },
+    }
+  }
+  if (m.video_note) {
+    return { text: '(video note)', attachment: { kind: 'video_note', file_id: m.video_note.file_id, size: m.video_note.file_size } }
+  }
+  if (m.sticker) {
+    const emoji = m.sticker.emoji ? ` ${m.sticker.emoji}` : ''
+    return { text: `(sticker${emoji})`, attachment: { kind: 'sticker', file_id: m.sticker.file_id, size: m.sticker.file_size } }
+  }
+  if (typeof m.text === 'string') return { text: m.text }
+  return null
+}
+// === GRACE END_BLOCK: broker_core =============================================

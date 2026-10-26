@@ -1,0 +1,13 @@
+{
+  "listen": "127.0.0.1:2223",
+  "state_dir": "/var/lib/ccswitchboard",
+  "api_root": "https://api.telegram.org",
+  "lang": "en",
+  "runner": [],
+  "orca": "orca",
+  "projects_root": "~/projects",
+  "claude_cmd": "claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions",
+  "usage_file": "",
+  "timezone": "Europe/Moscow",
+  "digest_at": "10:00"
+}
