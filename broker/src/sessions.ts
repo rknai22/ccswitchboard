@@ -451,17 +451,27 @@ async function closeTerminals(name: string, list: { handle: string }[]): Promise
   return closed
 }
 
-// Live processes on the session machine whose environment holds
-// CCSB_KEY=<key> (the key comes on stdin, never in argv). Linux: /proc, where
-// a same-user process's environ is readable — a real count, 0 included.
-// Elsewhere `ps -E` (BSD/macOS) shows the environment of only some processes
-// (not of hardened binaries), so it can prove presence but never absence:
-// a positive count, otherwise "unknown".
+// Live Claude sessions of a topic on the session machine. CCSB_KEY=<key> is in
+// the environment of claude AND of everything it starts (the shim, background
+// jobs, dev servers — some outlive the session), so a key-holder counts only
+// when it IS the program claude_cmd runs: its argv[0], argv[1] (interpreter
+// or wrapper scripts), comm or executable has that basename. Other
+// key-holders are reported (pid, comm) but never block a launch. The key comes
+// on stdin, the program name in argv.
+// Linux: /proc, where a same-user process's environ is readable — a real
+// count, 0 included. Elsewhere `ps -E` (BSD/macOS) shows the environment of
+// only some processes (not of hardened binaries): it proves presence, never
+// absence, so no match there is "unknown" (n: null).
 const KEYPROC_PY = String.raw`
-import os, subprocess, sys
+import json, os, subprocess, sys
 mark = ("CCSB_KEY=" + sys.stdin.read().strip()).encode()
+prog = os.path.basename(sys.argv[1]) if len(sys.argv) > 1 else ""
 me = os.getpid()
-n = 0
+claude, others, undecided = [], [], 0
+def names(*xs):
+    return {os.path.basename(x) for x in xs if x}
+if not prog:
+    print(json.dumps({"n": None, "why": "no program name"})); sys.exit(0)
 if os.path.isdir("/proc/self"):
     for p in os.listdir("/proc"):
         if not p.isdigit() or int(p) == me: continue
@@ -469,38 +479,82 @@ if os.path.isdir("/proc/self"):
             env = open("/proc/%s/environ" % p, "rb").read()
         except Exception:
             continue
-        if mark in env.split(b"\0"): n += 1
-    print(n)
+        if mark not in env.split(b"\0"): continue
+        try:
+            argv = [a.decode("utf8", "replace") for a in open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")]
+            comm = open("/proc/%s/comm" % p).read().strip()
+        except Exception:
+            undecided += 1; continue
+        try: exe = os.readlink("/proc/%s/exe" % p)
+        except Exception: exe = ""
+        rec = {"pid": int(p), "comm": comm[:32]}
+        if prog in names(argv[0] if argv else "", argv[1] if len(argv) > 1 else "", exe) or comm == prog[:15]:
+            claude.append(rec)
+        else:
+            others.append(rec)
+    n = None if undecided else len(claude)
 else:
-    r = subprocess.run(["ps", "-E", "-ww", "-o", "pid=,command=", "-U", str(os.getuid())], capture_output=True)
+    r = subprocess.run(["ps", "-E", "-ww", "-o", "pid=,comm=,args=", "-U", str(os.getuid())], capture_output=True)
     if r.returncode != 0:
-        print("unknown"); sys.exit(0)
+        print(json.dumps({"n": None, "why": "ps failed"})); sys.exit(0)
     for line in r.stdout.split(b"\n"):
         parts = line.split()
-        if len(parts) < 2 or parts[0] == str(me).encode(): continue
-        if mark in parts[1:]: n += 1
-    print(n if n > 0 else "unknown")
+        if len(parts) < 3 or parts[0] == str(me).encode() or mark not in parts[2:]: continue
+        # BSD comm is cut to 16 chars (a long path loses its basename); argv[0]
+        # names the program both for the match and in the log.
+        comm = parts[1].decode("utf8", "replace")
+        arg0 = parts[2].decode("utf8", "replace")
+        rec = {"pid": int(parts[0]), "comm": os.path.basename(arg0)[:32]}
+        (claude if prog in names(comm, arg0) else others).append(rec)
+    n = len(claude) if claude else None
+print(json.dumps({"n": n, "claude": claude[:10], "others": others[:10], "others_total": len(others), "undecided": undecided}))
 `
 
-/** Number of live processes carrying the topic's key, or null when unknown. */
-async function keyProcesses(key: string): Promise<number | null> {
-  const r = await runOnSessionHost(['python3', '-c', KEYPROC_PY], { input: key, timeoutMs: CMD_TIMEOUT_MS, label: 'key_processes' })
-  const n = Number(r.stdout.trim())
-  return r.code === 0 && r.stdout.trim() !== '' && Number.isInteger(n) ? n : null
+/** The program claude_cmd runs: its first word that is not an env assignment
+ *  or a plain launcher (env, exec, nohup, nice, command). */
+export function programOf(cmd: string): string {
+  for (const w of cmd.trim().split(/\s+/)) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || ['env', 'exec', 'nohup', 'nice', 'command'].includes(w)) continue
+    return w.slice(w.lastIndexOf('/') + 1)
+  }
+  return ''
 }
+
+type KeyProcs = { n: number | null; claude: { pid: number; comm: string }[]; others: { pid: number; comm: string }[]; othersTotal: number }
+
+/** Live Claude processes holding the topic's key (n: null when unknown). */
+async function keyProcesses(key: string): Promise<KeyProcs> {
+  const r = await runOnSessionHost(['python3', '-c', KEYPROC_PY, programOf(ctx().config.claude_cmd)], {
+    input: key, timeoutMs: CMD_TIMEOUT_MS, label: 'key_processes',
+  })
+  const j = parseJson(r.stdout)
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter(x => typeof x?.pid === 'number').map(x => ({ pid: x.pid as number, comm: String(x.comm ?? '').slice(0, 32) })) : [])
+  if (r.code !== 0 || !j || typeof j !== 'object') return { n: null, claude: [], others: [], othersTotal: 0 }
+  return {
+    n: typeof j.n === 'number' && Number.isInteger(j.n) ? j.n : null,
+    claude: list(j.claude),
+    others: list(j.others),
+    othersTotal: typeof j.others_total === 'number' ? j.others_total : 0,
+  }
+}
+
+const procsField = (xs: { pid: number; comm: string }[]) => xs.map(x => `${x.pid}:${x.comm}`).join(',') || null
 
 /** Close the topic's own terminals (proved by launch history) — used when the
  *  topic is deleted, before its kv (and so the history) is wiped. Terminals we
  *  cannot prove are ours are left alone. */
-export async function closeTopicTerminals(name: string): Promise<{ closed: number; others: number; alive: number | null }> {
-  const c = ctx()
-  const row = c.store.topic(name)
-  if (!row?.cwd) return { closed: 0, others: 0, alive: null }
-  const cen = await census(name, row.cwd)
-  const closed = await closeTerminals(name, cen.ours)
-  const alive = await keyProcesses(row.key)
-  c.log('topic_terminals_closed', { topic: name, closed, others: cen.others, alive })
-  return { closed, others: cen.others, alive }
+export function closeTopicTerminals(name: string): Promise<{ closed: number; others: number; alive: number | null }> {
+  // Same per-topic queue as ensure(): no launch can interleave with the close.
+  return serial(name, async () => {
+    const c = ctx()
+    const row = c.store.topic(name)
+    if (!row?.cwd) return { closed: 0, others: 0, alive: null }
+    const cen = await census(name, row.cwd)
+    const closed = await closeTerminals(name, cen.ours)
+    const kp = await keyProcesses(row.key)
+    c.log('topic_terminals_closed', { topic: name, closed, others: cen.others, alive: kp.n, claude_pids: procsField(kp.claude) })
+    return { closed, others: cen.others, alive: kp.n }
+  })
 }
 
 function blockedNotice(name: string, cwd: string, alive: boolean): void {
@@ -524,12 +578,17 @@ export type EnsureResult = {
   error?: string
 }
 
-/** Make sure the topic has a folder and a live session; serialized per topic. */
-export function ensure(name: string): Promise<EnsureResult> {
+/** Run fn after everything queued for this topic (ensure, terminal close). */
+function serial<T>(name: string, fn: () => Promise<T>): Promise<T> {
   const prev = chains.get(name) ?? Promise.resolve()
-  const run = prev.then(() => ensureNow(name))
+  const run = prev.then(fn)
   chains.set(name, run.catch(() => {}))
   return run
+}
+
+/** Make sure the topic has a folder and a live session; serialized per topic. */
+export function ensure(name: string): Promise<EnsureResult> {
+  return serial(name, () => ensureNow(name))
 }
 
 async function ensureNow(name: string): Promise<EnsureResult> {
@@ -574,19 +633,27 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   // ours, then launch only if no process with this topic's key survives and
   // nothing unrecognised could be a restored copy of our session.
   const cen = await census(name, cwd)
-  const aliveBefore = await keyProcesses(row.key)
+  let kp = await keyProcesses(row.key)
   if (cen.ours.length) await closeTerminals(name, cen.ours)
-  let alive = aliveBefore
   // Our closed claude needs a moment to exit; poll instead of guessing.
-  for (const end = Date.now() + timing.closeSettleMs; cen.ours.length && alive !== null && alive > 0 && Date.now() < end;) {
+  for (const end = Date.now() + timing.closeSettleMs; cen.ours.length && kp.n !== null && kp.n > 0 && Date.now() < end;) {
     await new Promise(r => setTimeout(r, 500))
-    alive = await keyProcesses(row.key)
+    kp = await keyProcesses(row.key)
   }
+  const alive = kp.n
+  if (kp.othersTotal) c.log('key_holders_ignored', { topic: name, count: kp.othersTotal, procs: procsField(kp.others) })
   const safe = alive === 0 || (alive === null && cen.listOk && cen.others === 0)
   if (!safe) {
-    c.log('launch_blocked', { topic: name, alive, list_ok: cen.listOk, ours: cen.ours.length, others: cen.others })
-    blockedNotice(name, cwd, alive !== null && alive > 0)
-    return { launched: false, reason: alive !== null && alive > 0 ? 'blocked_alive' : 'blocked_unknown', cwd, prepare }
+    const isAlive = alive !== null && alive > 0
+    // Pids and comms only (never the key) — enough for the owner to find them.
+    c.log('launch_blocked', {
+      topic: name, alive, list_ok: cen.listOk, ours: cen.ours.length, others: cen.others, claude_pids: procsField(kp.claude),
+    })
+    // The claude we just closed may still be exiting: say nothing this time —
+    // the next attempt (one launch gap later) reports if it is still there.
+    if (isAlive && cen.ours.length) c.log('launch_deferred', { topic: name })
+    else blockedNotice(name, cwd, isAlive)
+    return { launched: false, reason: isAlive ? 'blocked_alive' : 'blocked_unknown', cwd, prepare }
   }
 
   const fails = num(c.store.get(k(name, 'fails')))
