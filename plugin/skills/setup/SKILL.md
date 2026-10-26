@@ -21,12 +21,12 @@ return. Arguments passed: `$ARGUMENTS` (may be a bot token).
 
 ## 0. Where are we
 
-Call `setup_status`.
+Call `setup_status`. Every session has it: sessions bound to a topic get
+`setup_status` and `reset`; `setup_token` exists only in a session that is not
+bound to a topic (setup mode).
 
-- **The tool does not exist in this session** → this session is bound to a
-  topic, which means the broker is already configured. Say: "ccswitchboard is
-  already set up. To change the bot or the group, run `/ccswitchboard:reset`."
-  If they insist on setting up from scratch, the wizard has to run in a session
+- **Error "the broker refused this session: <reason>"** → this session's topic
+  key is no longer valid (e.g. after a reset). Run the wizard in a session
   started without a topic key: `claude --channels plugin:ccswitchboard@ccswitchboard`.
 - **Error "broker is not responding: <address>"** → the broker is not running
   or not reachable at that address. Tell the user to start it (README, section

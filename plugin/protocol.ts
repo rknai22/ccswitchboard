@@ -11,6 +11,9 @@
 //        accepted only for message_ids the broker recorded for that topic.
 //   INV: files travel as bytes (base64) in both directions: shim and broker may
 //        live on different machines and never share a filesystem.
+//   INV: message ids are non-zero integers; a negative message_id means the
+//        owner's private chat with the bot (so it never collides with a group
+//        id). Opaque to the shim: pass it back as is.
 
 export const PROTOCOL_VERSION = 1
 export const DEFAULT_BROKER = '127.0.0.1:2223'
@@ -57,6 +60,7 @@ export type InboundEvent = {
   t: 'event'
   update_id: number
   topic: string
+  /** Negative = the owner's private chat (see MODULE_CONTRACT). */
   message_id: number
   user: string
   user_id: string

@@ -14,31 +14,31 @@ Talk to the user in their language.
 
 ## Steps
 
-1. Call the channel tool `reset`.
+1. Call the channel tool `reset`. Any session can: sessions bound to a topic
+   (General and the others) have `reset` too, as do sessions started without a
+   topic key.
 
 2. Success (`{"sent": true}`) → tell the user: "Press the reset button in
    General (“Reset ccswitchboard setup?”) within 10 minutes. Only the owner's
    press counts." Then explain what it does: the bot token, the owner, the
    group and the topic registry are erased; topic folders and sessions stay,
    but they stop receiving messages until a new setup. After that, run
-   `/ccswitchboard:setup` again.
+   `/ccswitchboard:setup` again (in this session or any other).
 
-3. The tool does not exist in this session → this session cannot reach the
-   reset (it is bound to a topic and the broker did not offer `reset` here).
-   Run the reset in a session started without a topic key:
-   `claude --channels plugin:ccswitchboard@ccswitchboard`, then
-   `/ccswitchboard:reset` there.
+3. Error "the broker refused this session: <reason>" → this session's topic
+   key is no longer valid. Run `/ccswitchboard:reset` in a session started
+   without a topic key: `claude --channels plugin:ccswitchboard@ccswitchboard`.
 
-4. Error, or the bot is lost (token revoked, group deleted, the button never
-   arrives) → the button cannot be pressed. Tell the user to reset on the
-   broker machine instead:
+4. Any other error, or the bot is lost (token revoked, group deleted, the
+   button never arrives) → the button cannot be pressed. Tell the user to
+   reset on the broker machine instead, from the ccswitchboard checkout there
+   (there is no global command):
 
    ```
-   ccswitchboard-broker reset --config <path to the broker's config.json>
+   bun broker/src/main.ts reset --config <path to the broker's config.json>
    ```
 
-   (from a checkout of the repo: `bun broker/src/main.ts reset --config <path>`).
-   It does the same as the button, without asking.
+   It does the same as the button, without asking, and prints "reset done".
 
    Error "broker is not responding: <address>" → the broker is not running or
    not reachable; the reset has to wait until it is, or be done with the

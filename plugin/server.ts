@@ -578,7 +578,9 @@ function optId(args: Record<string, unknown>, k: string): number | undefined {
   const v = args[k]
   if (v == null || v === '') return undefined
   const n = Number(v)
-  if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${k} must be a message id (positive integer), got ${JSON.stringify(v)}`)
+  // Negative ids are the owner's private chat (protocol.ts): opaque, passed
+  // back to the broker as they came.
+  if (!Number.isSafeInteger(n) || n === 0) throw new Error(`${k} must be a message id (non-zero integer), got ${JSON.stringify(v)}`)
   return n
 }
 
