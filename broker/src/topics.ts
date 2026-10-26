@@ -145,9 +145,14 @@ function onUpdate(u: Update, ctx: BrokerContext): boolean {
   } else if (m.forum_topic_closed) {
     ctx.store.setTopicState(row.name, 'closed')
     ctx.unbind(row.name, 'topic closed')
-    ctx.log('topic_closed', { topic: row.name })
+    const dropped = ctx.store.dropUndelivered(row.name)
+    ctx.log('topic_closed', { topic: row.name, undelivered_dropped: dropped })
   } else if (m.forum_topic_reopened) {
     ctx.store.setTopicState(row.name, 'open')
+    // Closing unbound the shim for good (it drops its key on "unbound"), so its
+    // still-running Claude can never reconnect: the next ensure replaces our
+    // own terminal (resuming the conversation) instead of waiting on it.
+    ctx.store.set(`topic:${row.name}:force_relaunch`, 1)
     ctx.log('topic_reopened', { topic: row.name })
   }
   return true

@@ -102,6 +102,14 @@ const STRINGS = {
     en: 'topic {name}: the session is not connected; I cannot count processes on the session machine, and {cwd} has a terminal I cannot identify as mine (it may be a restored copy of the session). Not starting a second one — once that folder has no extra terminals in Orca, I will start it again.',
     ru: 'тема {name}: сессия не на связи; процессы на машине сессий проверить не могу, а в {cwd} открыт терминал, который я не могу опознать как свой (может быть восстановленной копией сессии). Вторую не запускаю — как только в этой папке в Orca не останется лишних терминалов, подниму сам.',
   },
+  session_alive_unreachable: {
+    en: 'topic {name}: the session is alive but cannot reach the broker (network from the session machine to the broker?). Not restarting it, so its work and conversation are kept.',
+    ru: 'тема {name}: сессия жива, но не на связи с брокером (сеть машины сессий → брокер?). Не перезапускаю, чтобы не потерять её работу и разговор.',
+  },
+  topic_closed_hint: {
+    en: 'This topic is closed — reopen it to continue.',
+    ru: 'Тема закрыта — открой её, чтобы продолжить.',
+  },
 } satisfies Record<string, Record<Lang, string>>
 
 export type StringKey = keyof typeof STRINGS

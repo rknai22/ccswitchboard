@@ -282,6 +282,12 @@ export class Store {
     }
   }
 
+  /** Topic closed: its undelivered events go, so a reopen (maybe days later)
+   *  does not hand the session stale orders. Returns how many were dropped. */
+  dropUndelivered(topic: string): number {
+    return this.db.query('DELETE FROM updates WHERE topic = ? AND delivered = 0').run(topic).changes
+  }
+
   /** The topic is gone in Telegram: drop its row, queue, message map and the
    *  modules' per-topic kv (keys "topic:<name>:…"). Folders are not ours to
    *  delete and live elsewhere anyway. */

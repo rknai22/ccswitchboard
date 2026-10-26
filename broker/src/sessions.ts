@@ -14,6 +14,10 @@
 //        "topic:<name>:launch_at", written BEFORE the terminal is created, so
 //        neither a broker restart nor two concurrent ensure() calls can start
 //        a second session for the same topic.
+//   INV: a live Claude with the topic's key is a live session even while its
+//        shim is not connected: it is never closed or relaunched for that
+//        (the owner hears "alive but cannot reach the broker"); only a
+//        reopened topic replaces our own terminal.
 //   INV: one Claude per topic across Orca restarts: a terminal is closed only
 //        when its handle or tabId is in the topic's launch history, and a
 //        launch is skipped (owner told) while a process with the topic's key
@@ -557,6 +561,15 @@ export function closeTopicTerminals(name: string): Promise<{ closed: number; oth
   })
 }
 
+/** "Alive but cannot reach the broker" — at most once per 15 min per topic. */
+function aliveNotice(name: string, cwd: string): void {
+  const c = ctx()
+  const key = k(name, 'alive_notice_at')
+  if (Date.now() - num(c.store.get(key)) < timing.noticeGapMs) return
+  c.store.set(key, Date.now())
+  void c.notifyGeneral(t(c.config.lang, 'session_alive_unreachable', { name, cwd }))
+}
+
 function blockedNotice(name: string, cwd: string, alive: boolean): void {
   const c = ctx()
   const key = k(name, 'blocked_notice_at')
@@ -570,8 +583,8 @@ function blockedNotice(name: string, cwd: string, alive: boolean): void {
 export type EnsureResult = {
   launched: boolean
   /** connected | recent_launch | closed | unknown_topic | not_configured |
-   *  folder_failed | orca_down | orca_settling | blocked_alive |
-   *  blocked_unknown | create_failed | launched */
+   *  folder_failed | orca_down | orca_settling | alive_unreachable |
+   *  blocked_alive | blocked_unknown | create_failed | launched */
   reason: string
   cwd?: string
   prepare?: PrepareResult
@@ -629,11 +642,27 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   const now = Date.now()
   c.store.set(k(name, 'launch_at'), now)
 
-  // One session per topic, also across Orca restarts: close what is provably
-  // ours, then launch only if no process with this topic's key survives and
-  // nothing unrecognised could be a restored copy of our session.
+  // One session per topic, also across Orca restarts. "Shim not connected" is
+  // not "Claude dead": the link from the session machine to the broker can be
+  // down while Claude works. So a live Claude holding the key means alive —
+  // nothing is closed or relaunched (that would kill its work and, after a
+  // failed resume, its conversation); only the census proving no live Claude
+  // (or "unknown" with no unrecognised terminals) allows a launch. The
+  // exception is a reopened topic: closing unbound its shim for good, so our
+  // own terminal is replaced (with --resume).
+  const force = c.store.get(k(name, 'force_relaunch')) === '1'
   const cen = await census(name, cwd)
   let kp = await keyProcesses(row.key)
+  if (kp.othersTotal) c.log('key_holders_ignored', { topic: name, count: kp.othersTotal, procs: procsField(kp.others) })
+  if (!force && kp.n !== null && kp.n > 0) {
+    // It runs: whatever this launch was, it was not a failure to come up.
+    c.store.set(k(name, 'fails'), 0)
+    // Pids and comms only (never the key) — enough for the owner to find them.
+    c.log('session_alive_unreachable', { topic: name, ours: cen.ours.length, others: cen.others, claude_pids: procsField(kp.claude) })
+    if (cen.ours.length) aliveNotice(name, cwd)
+    else blockedNotice(name, cwd, true)
+    return { launched: false, reason: cen.ours.length ? 'alive_unreachable' : 'blocked_alive', cwd, prepare }
+  }
   if (cen.ours.length) await closeTerminals(name, cen.ours)
   // Our closed claude needs a moment to exit; poll instead of guessing.
   for (const end = Date.now() + timing.closeSettleMs; cen.ours.length && kp.n !== null && kp.n > 0 && Date.now() < end;) {
@@ -641,11 +670,9 @@ async function ensureNow(name: string): Promise<EnsureResult> {
     kp = await keyProcesses(row.key)
   }
   const alive = kp.n
-  if (kp.othersTotal) c.log('key_holders_ignored', { topic: name, count: kp.othersTotal, procs: procsField(kp.others) })
   const safe = alive === 0 || (alive === null && cen.listOk && cen.others === 0)
   if (!safe) {
     const isAlive = alive !== null && alive > 0
-    // Pids and comms only (never the key) — enough for the owner to find them.
     c.log('launch_blocked', {
       topic: name, alive, list_ok: cen.listOk, ours: cen.ours.length, others: cen.others, claude_pids: procsField(kp.claude),
     })
@@ -655,6 +682,7 @@ async function ensureNow(name: string): Promise<EnsureResult> {
     else blockedNotice(name, cwd, isAlive)
     return { launched: false, reason: isAlive ? 'blocked_alive' : 'blocked_unknown', cwd, prepare }
   }
+  if (force) c.log('relaunch_after_reopen', { topic: name, closed: cen.ours.length })
 
   const fails = num(c.store.get(k(name, 'fails')))
   c.store.set(k(name, 'fails'), fails + 1)
@@ -698,6 +726,7 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   if (handle || tabId) remember(name, { ...(handle ? { handle } : {}), ...(tabId ? { tabId } : {}) })
   c.store.del(k(name, 'handle'))
   if (!handle) c.log('terminal_create_shape', { topic: name, keys: Object.keys(term ?? {}).join(',') })
+  c.store.del(k(name, 'force_relaunch'))
   c.store.set(k(name, 'launch_resume'), resume ? 1 : 0)
   c.store.set(k(name, 'sid_pending'), now)
   if (c.store.get(k(name, 'state')) !== 'down') c.store.set(k(name, 'state'), 'starting')
@@ -753,7 +782,7 @@ export async function watchdogTick(): Promise<void> {
         lastSeen.set(name, now)
         const st = c.store.get(k(name, 'state'))
         if (st !== 'up') {
-          if (st === 'down') notice(name, 'up')
+          if (st === 'down' || st === 'unreachable') notice(name, 'up')
           c.store.set(k(name, 'state'), 'up')
           c.log('session_up', { topic: name, since: c.connectedSince(name) })
         }
@@ -769,13 +798,19 @@ export async function watchdogTick(): Promise<void> {
         startedAt + timing.startGraceMs - timing.launchGapMs,
       )
       if (now - ref < timing.launchGapMs) continue
-      if (c.store.get(k(name, 'state')) !== 'down') {
-        c.store.set(k(name, 'state'), 'down')
-        c.log('session_down', { topic: name })
-        notice(name, 'down')
-      }
       const res = await ensure(name)
       if (!res.launched) c.log('ensure_skipped', { topic: name, reason: res.reason })
+      // These say nothing about the session's health (a launch just happened,
+      // it reconnected meanwhile, the topic went away): no state change.
+      if (['recent_launch', 'connected', 'closed', 'unknown_topic', 'not_configured'].includes(res.reason)) continue
+      // Alive but cut off from the broker is not "down": ensure already told
+      // the owner which it is.
+      const st = res.reason === 'alive_unreachable' ? 'unreachable' : 'down'
+      if (c.store.get(k(name, 'state')) !== st) {
+        c.store.set(k(name, 'state'), st)
+        c.log(st === 'down' ? 'session_down' : 'session_unreachable', { topic: name })
+        if (st === 'down') notice(name, 'down')
+      }
     }
   } catch (e) {
     c.log('tick_failed', { err: e instanceof Error ? e.message : String(e) })

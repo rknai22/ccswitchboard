@@ -25,7 +25,7 @@ import { Telegram, describeError } from './telegram.ts'
 
 process.umask(0o077)
 
-const USAGE = 'usage: ccswitchboard-broker <serve|reset|status|key <topic>|digest --now> --config <path>'
+const USAGE = 'usage: bun broker/src/main.ts <serve|reset|status|key <topic>|digest --now> --config <path>'
 
 function parseArgs(argv: string[]): { cmd: string; rest: string[]; config: string } {
   const rest: string[] = []

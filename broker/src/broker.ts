@@ -8,6 +8,8 @@
 //        which maps to "general"); anyone else is dropped without a reply.
 //   INV: a topic session can edit, react to or quote only messages recorded
 //        for its own topic; the shim never names a chat or a thread.
+//   INV: a closed topic accepts nothing: its messages are dropped (no 👀, no
+//        queue, so a reopen replays nothing), with one hint per 15 min there.
 //   INV: General vs topic is decided by is_topic_message, not by the presence
 //        of message_thread_id — Telegram also sets the latter on plain replies
 //        in General.
@@ -25,6 +27,7 @@ import { Telegram, describeError, type AllowedUpdate } from './telegram.ts'
 
 const ACK_REACTION = '👀'
 const CONFLICT_NOTICE_EVERY_MS = 3600_000
+const CLOSED_HINT_EVERY_MS = 15 * 60_000
 
 // Filenames and titles are uploader-controlled and end up inside the session's
 // <channel> tag — delimiter chars would let them break out (as upstream).
@@ -212,7 +215,11 @@ export class Broker {
     const s = this.sec!
     const from = m.from
     if (!from || from.id !== s.owner_id) {
-      log('core', 'drop_sender', { update_id: updateId, chat_id: m.chat.id })
+      // An owner posting as "Remain anonymous" admin arrives from
+      // GroupAnonymousBot with sender_chat = the group: flag it so the log
+      // explains the silence (the README tells owners to turn that off).
+      const anonymous = m.sender_chat?.id === s.chat_id
+      log('core', 'drop_sender', { update_id: updateId, chat_id: m.chat.id, ...(anonymous ? { anonymous_admin: true } : {}) })
       return 'drop'
     }
     const dm = m.chat.type === 'private' && m.chat.id === s.owner_id
@@ -228,6 +235,13 @@ export class Broker {
       const row = this.store.topicByThread(m.message_thread_id)
       if (!row) {
         log('core', 'drop_unknown_thread', { update_id: updateId, thread_id: m.message_thread_id })
+        return 'drop'
+      }
+      // A closed topic takes nothing: no 👀 (nobody reads it), no queue (a
+      // reopen days later must not replay stale orders) — one short hint.
+      if (row.state !== 'open') {
+        log('core', 'drop_closed_topic', { update_id: updateId, topic: row.name })
+        this.closedHint(row.name)
         return 'drop'
       }
       topic = row.name
@@ -283,6 +297,16 @@ export class Broker {
   }
 
   // ---- outbound ----------------------------------------------------------------
+
+  /** "This topic is closed" into the closed topic itself, at most once per
+   *  CLOSED_HINT_EVERY_MS per topic — the owner writes there, so says it there. */
+  private closedHint(topic: string): void {
+    const key = `topic:${topic}:closed_hint_at`
+    if (Date.now() - Number(this.store.get(key) ?? 0) < CLOSED_HINT_EVERY_MS) return
+    this.store.set(key, Date.now())
+    void this.sendTopic(topic, t(this.cfg.lang, 'topic_closed_hint'))
+      .catch(e => log('core', 'closed_hint_failed', { topic, err: describeError(e) }))
+  }
 
   async notifyGeneral(text: string): Promise<void> {
     if (!this.isLocked()) return
