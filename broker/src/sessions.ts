@@ -14,6 +14,12 @@
 //        "topic:<name>:launch_at", written BEFORE the terminal is created, so
 //        neither a broker restart nor two concurrent ensure() calls can start
 //        a second session for the same topic.
+//   INV: one Claude per topic across Orca restarts: a terminal is closed only
+//        when its handle or tabId is in the topic's launch history, and a
+//        launch is skipped (owner told) while a process with the topic's key
+//        lives outside the terminals we can prove — or, when processes cannot
+//        be counted, while unrecognised terminals sit in the topic folder.
+//        After Orca comes back, launches wait launchGapMs for restored shims.
 //   INV: closed topics are never (re)started; folders are never deleted.
 //   INV: a folder is trusted (~/.claude.json) only when it sits directly in
 //        projects_root — the broker never vouches for folders it did not make.
@@ -35,6 +41,8 @@ export const timing = {
   /** per topic and per kind of signal in General */
   noticeGapMs: 15 * 60_000,
   orcaStatusCacheMs: 20_000,
+  /** after closing our terminal, how long to wait for its claude to exit */
+  closeSettleMs: 5_000,
 }
 const CMD_TIMEOUT_MS = 20_000
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -85,14 +93,18 @@ try:
     ex = r.stdout.strip()
     if not os.path.isabs(ex): ex = os.path.join(cwd, ex)
     os.makedirs(os.path.dirname(ex), exist_ok=True)
-    lines = open(ex).read().splitlines() if os.path.exists(ex) else []
-    if any(l.strip() in ("CLAUDE.local.md", "/CLAUDE.local.md") for l in lines):
-        rep["exclude"] = "present"
-    else:
+    # The session's own files must never ride into the project's commits:
+    # its instructions and its status board (free text about the work).
+    text = open(ex).read() if os.path.exists(ex) else ""
+    have = {l.strip().lstrip("/") for l in text.splitlines()}
+    missing = [n for n in ("CLAUDE.local.md", "STATUS.json") if n not in have]
+    if missing:
         with open(ex, "a") as f:
-            if lines and not open(ex).read().endswith("\n"): f.write("\n")
-            f.write("/CLAUDE.local.md\n")
-        rep["exclude"] = "added"
+            if text and not text.endswith("\n"): f.write("\n")
+            for n in missing: f.write("/" + n + "\n")
+        rep["exclude"] = "added " + ",".join(missing)
+    else:
+        rep["exclude"] = "present"
     os.makedirs(gpt, exist_ok=True)
     rep["gpt"] = "ok"
     rep["ok"] = True
@@ -282,6 +294,23 @@ async function orcaUp(): Promise<boolean> {
   if (up && j?.result?.runtime && j.result.runtime.reachable === false) up = false
   if (r.code === 0 && j?.result?.runtime?.reachable === undefined) c.log('orca_status_shape', { has_json: j !== undefined })
   orcaCache = { at: Date.now(), up }
+  // Orca coming back — after being down, or with a new runtime id (it
+  // restarted between two checks) — may restore our tabs and re-run their
+  // commands; launches wait launchGapMs so restored shims can reconnect first.
+  // The very first observation is not a "coming back".
+  const runtimeId = j?.result?.runtime?.runtimeId ?? j?._meta?.runtimeId
+  const prevRuntime = c.store.get('sessions:orca_runtime')
+  const wasDown = c.store.get('sessions:orca_state') === 'down'
+  if (up) {
+    if (wasDown || (typeof runtimeId === 'string' && prevRuntime !== undefined && prevRuntime !== runtimeId)) {
+      c.store.set('sessions:orca_up_since', Date.now())
+      c.log('orca_back', { was_down: wasDown, runtime_changed: !wasDown })
+    }
+    if (typeof runtimeId === 'string') c.store.set('sessions:orca_runtime', runtimeId)
+    c.store.set('sessions:orca_state', 'up')
+  } else {
+    c.store.set('sessions:orca_state', 'down')
+  }
   if (!up) {
     c.log('orca_down', { err: orcaError(r) })
     const last = num(c.store.get('sessions:orca_notice_at'))
@@ -330,30 +359,156 @@ function terminalsOf(j: any): any[] {
   return Array.isArray(list) ? list : []
 }
 
-/** Close the topic's previous terminal(s): by the handle we got at launch, or by
- *  our tab title (a handle does not survive an Orca restart). */
-async function closeOld(name: string): Promise<number> {
+// ---- which terminals are ours ---------------------------------------------------
+//
+// What Orca 1.4.238 gives us (read from its CLI and runtime source):
+//   handle   — "term_<random uuid>" issued per runtime from in-memory maps: a
+//              new one after every Orca restart;
+//   title    — the pane's live title: Claude rewrites it via OSC, so the
+//              "tg:<name>" we pass is gone within seconds; the tab's custom
+//              title is persisted but not exposed by `terminal list`;
+//   tabId    — the tab's entity id from the persisted workspace layout;
+//   worktreePath — the folder the terminal belongs to.
+// So a terminal is OURS only when its handle or its tabId is one we recorded
+// at launch (topic:<name>:terminals); title and folder alone prove nothing —
+// the owner opens terminals in the same folders by hand. A terminal we cannot
+// prove is ours is never closed.
+//
+// What survives everything is the process: the launched claude carries
+// CCSB_KEY=<this topic's key> in its environment. Before launching we count
+// such processes on the session machine; if one is alive outside the
+// terminals we can prove, we do not start a second session — the owner is
+// told instead.
+
+type TermRef = { handle?: string; tabId?: string }
+const HISTORY_MAX = 10
+
+function history(name: string): TermRef[] {
   const c = ctx()
-  const handle = c.store.get(k(name, 'handle'))
-  const title = `tg:${name}`
+  let list: TermRef[] = []
+  try {
+    const v = JSON.parse(c.store.get(k(name, 'terminals')) ?? '[]')
+    if (Array.isArray(v)) list = v.filter(x => x && typeof x === 'object')
+  } catch {}
+  const legacy = c.store.get(k(name, 'handle'))
+  if (legacy && !list.some(x => x.handle === legacy)) list.push({ handle: legacy })
+  return list
+}
+
+function remember(name: string, ref: TermRef): void {
+  const list = [ref, ...history(name).filter(x => !(ref.handle && x.handle === ref.handle) && !(ref.tabId && x.tabId === ref.tabId))]
+  ctx().store.set(k(name, 'terminals'), JSON.stringify(list.slice(0, HISTORY_MAX)))
+}
+
+const normPath = (p: unknown) => (typeof p === 'string' ? p.replace(/\/+$/, '') : '')
+
+type Census = {
+  /** terminal list answered */
+  listOk: boolean
+  /** provably ours: handle or tabId from our launch history */
+  ours: { handle: string; tabId?: string }[]
+  /** other terminals in the topic folder — the owner's, or ours unrecognisable */
+  others: number
+}
+
+async function census(name: string, cwd: string): Promise<Census> {
+  const c = ctx()
   const r = await orca(['terminal', 'list', '--json'], 'orca_terminal_list')
   const j = parseJson(r.stdout)
-  if (r.code !== 0 || j === undefined) {
+  if (r.code !== 0 || j === undefined || j?.ok === false) {
     c.log('terminal_list_failed', { topic: name, err: orcaError(r) })
-    return 0
+    return { listOk: false, ours: [], others: 0 }
   }
   if (!Array.isArray(j?.result?.terminals)) c.log('terminal_list_shape', { keys: Object.keys(j ?? {}).join(',') })
-  const ours = terminalsOf(j).filter(x =>
-    typeof x?.handle === 'string' && ((handle && x.handle === handle) || x.title === title || x.paneTitle === title),
-  )
+  const hist = history(name)
+  const handles = new Set(hist.map(x => x.handle).filter(Boolean))
+  const tabs = new Set(hist.map(x => x.tabId).filter(Boolean))
+  const out: Census = { listOk: true, ours: [], others: 0 }
+  for (const x of terminalsOf(j)) {
+    if (typeof x?.handle !== 'string') continue
+    const inFolder = normPath(x.worktreePath) === normPath(cwd)
+    const tabId = typeof x.tabId === 'string' ? x.tabId : undefined
+    if (handles.has(x.handle) || (inFolder && tabId && tabs.has(tabId))) {
+      out.ours.push({ handle: x.handle, ...(tabId ? { tabId } : {}) })
+      // A restart gave our tab a new handle: remember it too.
+      if (!handles.has(x.handle)) remember(name, { handle: x.handle, ...(tabId ? { tabId } : {}) })
+    } else if (inFolder) {
+      out.others++
+    }
+  }
+  return out
+}
+
+async function closeTerminals(name: string, list: { handle: string }[]): Promise<number> {
+  const c = ctx()
   let closed = 0
-  for (const x of ours) {
+  for (const x of list) {
     const cr = await orca(['terminal', 'close', '--terminal', x.handle, '--tab', '--json'], 'orca_terminal_close')
     if (cr.code === 0) closed++
     else c.log('terminal_close_failed', { topic: name, err: orcaError(cr) })
   }
-  if (ours.length) c.log('terminal_closed', { topic: name, found: ours.length, closed })
+  if (list.length) c.log('terminal_closed', { topic: name, found: list.length, closed })
   return closed
+}
+
+// Live processes on the session machine whose environment holds
+// CCSB_KEY=<key> (the key comes on stdin, never in argv). Linux: /proc, where
+// a same-user process's environ is readable — a real count, 0 included.
+// Elsewhere `ps -E` (BSD/macOS) shows the environment of only some processes
+// (not of hardened binaries), so it can prove presence but never absence:
+// a positive count, otherwise "unknown".
+const KEYPROC_PY = String.raw`
+import os, subprocess, sys
+mark = ("CCSB_KEY=" + sys.stdin.read().strip()).encode()
+me = os.getpid()
+n = 0
+if os.path.isdir("/proc/self"):
+    for p in os.listdir("/proc"):
+        if not p.isdigit() or int(p) == me: continue
+        try:
+            env = open("/proc/%s/environ" % p, "rb").read()
+        except Exception:
+            continue
+        if mark in env.split(b"\0"): n += 1
+    print(n)
+else:
+    r = subprocess.run(["ps", "-E", "-ww", "-o", "pid=,command=", "-U", str(os.getuid())], capture_output=True)
+    if r.returncode != 0:
+        print("unknown"); sys.exit(0)
+    for line in r.stdout.split(b"\n"):
+        parts = line.split()
+        if len(parts) < 2 or parts[0] == str(me).encode(): continue
+        if mark in parts[1:]: n += 1
+    print(n if n > 0 else "unknown")
+`
+
+/** Number of live processes carrying the topic's key, or null when unknown. */
+async function keyProcesses(key: string): Promise<number | null> {
+  const r = await runOnSessionHost(['python3', '-c', KEYPROC_PY], { input: key, timeoutMs: CMD_TIMEOUT_MS, label: 'key_processes' })
+  const n = Number(r.stdout.trim())
+  return r.code === 0 && r.stdout.trim() !== '' && Number.isInteger(n) ? n : null
+}
+
+/** Close the topic's own terminals (proved by launch history) — used when the
+ *  topic is deleted, before its kv (and so the history) is wiped. Terminals we
+ *  cannot prove are ours are left alone. */
+export async function closeTopicTerminals(name: string): Promise<{ closed: number; others: number; alive: number | null }> {
+  const c = ctx()
+  const row = c.store.topic(name)
+  if (!row?.cwd) return { closed: 0, others: 0, alive: null }
+  const cen = await census(name, row.cwd)
+  const closed = await closeTerminals(name, cen.ours)
+  const alive = await keyProcesses(row.key)
+  c.log('topic_terminals_closed', { topic: name, closed, others: cen.others, alive })
+  return { closed, others: cen.others, alive }
+}
+
+function blockedNotice(name: string, cwd: string, alive: boolean): void {
+  const c = ctx()
+  const key = k(name, 'blocked_notice_at')
+  if (Date.now() - num(c.store.get(key)) < timing.noticeGapMs) return
+  c.store.set(key, Date.now())
+  void c.notifyGeneral(t(c.config.lang, alive ? 'session_blocked_alive' : 'session_blocked_unknown', { name, cwd }))
 }
 
 // ---- ensure -------------------------------------------------------------------------
@@ -361,7 +516,8 @@ async function closeOld(name: string): Promise<number> {
 export type EnsureResult = {
   launched: boolean
   /** connected | recent_launch | closed | unknown_topic | not_configured |
-   *  folder_failed | orca_down | create_failed | launched */
+   *  folder_failed | orca_down | orca_settling | blocked_alive |
+   *  blocked_unknown | create_failed | launched */
   reason: string
   cwd?: string
   prepare?: PrepareResult
@@ -406,10 +562,33 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   const last = num(c.store.get(k(name, 'launch_at')))
   if (Date.now() - last < timing.launchGapMs) return { launched: false, reason: 'recent_launch', cwd, prepare }
   if (!(await orcaUp())) return { launched: false, reason: 'orca_down', cwd, prepare }
+  if (Date.now() - num(c.store.get('sessions:orca_up_since')) < timing.launchGapMs) {
+    return { launched: false, reason: 'orca_settling', cwd, prepare }
+  }
 
   // The lock goes first: from here on a session may come up.
   const now = Date.now()
   c.store.set(k(name, 'launch_at'), now)
+
+  // One session per topic, also across Orca restarts: close what is provably
+  // ours, then launch only if no process with this topic's key survives and
+  // nothing unrecognised could be a restored copy of our session.
+  const cen = await census(name, cwd)
+  const aliveBefore = await keyProcesses(row.key)
+  if (cen.ours.length) await closeTerminals(name, cen.ours)
+  let alive = aliveBefore
+  // Our closed claude needs a moment to exit; poll instead of guessing.
+  for (const end = Date.now() + timing.closeSettleMs; cen.ours.length && alive !== null && alive > 0 && Date.now() < end;) {
+    await new Promise(r => setTimeout(r, 500))
+    alive = await keyProcesses(row.key)
+  }
+  const safe = alive === 0 || (alive === null && cen.listOk && cen.others === 0)
+  if (!safe) {
+    c.log('launch_blocked', { topic: name, alive, list_ok: cen.listOk, ours: cen.ours.length, others: cen.others })
+    blockedNotice(name, cwd, alive !== null && alive > 0)
+    return { launched: false, reason: alive !== null && alive > 0 ? 'blocked_alive' : 'blocked_unknown', cwd, prepare }
+  }
+
   const fails = num(c.store.get(k(name, 'fails')))
   c.store.set(k(name, 'fails'), fails + 1)
 
@@ -432,8 +611,6 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   }
   if (sid && !resume) c.log('launch_fresh', { topic: name, had_session_id: true })
 
-  await closeOld(name)
-
   const cmd = `CCSB_KEY=${row.key} ${c.config.claude_cmd}${resume ? ` --resume ${sid}` : ''}`
   const r = await orca(['terminal', 'create', '--worktree', `path:${cwd}`, '--title', `tg:${name}`, '--command', cmd, '--json'], 'orca_terminal_create')
   const j = parseJson(r.stdout)
@@ -442,16 +619,22 @@ async function ensureNow(name: string): Promise<EnsureResult> {
     c.log('launch_failed', { topic: name, err })
     return { launched: false, reason: 'create_failed', cwd, prepare, error: err }
   }
-  const handle = j?.result?.terminal?.handle ?? j?.terminal?.handle ?? j?.result?.handle ?? j?.handle
-  if (typeof handle === 'string') c.store.set(k(name, 'handle'), handle)
-  else {
-    c.store.del(k(name, 'handle'))
-    c.log('terminal_create_shape', { topic: name, keys: Object.keys(j?.result ?? j ?? {}).join(',') })
+  const term = j?.result?.terminal ?? j?.terminal ?? j?.result ?? j
+  const handle = typeof term?.handle === 'string' ? term.handle : undefined
+  let tabId = typeof term?.tabId === 'string' ? term.tabId : undefined
+  if (handle && !tabId) {
+    // The create result may not carry the tab id; the list does.
+    const lr = await orca(['terminal', 'list', '--json'], 'orca_terminal_list')
+    const found = terminalsOf(parseJson(lr.stdout)).find(x => x?.handle === handle)
+    if (typeof found?.tabId === 'string') tabId = found.tabId
   }
+  if (handle || tabId) remember(name, { ...(handle ? { handle } : {}), ...(tabId ? { tabId } : {}) })
+  c.store.del(k(name, 'handle'))
+  if (!handle) c.log('terminal_create_shape', { topic: name, keys: Object.keys(term ?? {}).join(',') })
   c.store.set(k(name, 'launch_resume'), resume ? 1 : 0)
   c.store.set(k(name, 'sid_pending'), now)
   if (c.store.get(k(name, 'state')) !== 'down') c.store.set(k(name, 'state'), 'starting')
-  c.log('launched', { topic: name, resume, has_handle: typeof handle === 'string' })
+  c.log('launched', { topic: name, resume, has_handle: !!handle, has_tab: !!tabId })
   return { launched: true, reason: 'launched', cwd, prepare }
 }
 

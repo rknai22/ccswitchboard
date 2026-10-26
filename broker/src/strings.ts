@@ -88,14 +88,19 @@ const STRINGS = {
     en: 'Topic {name} was deleted in Telegram — removed it from the registry. Its folder {cwd} is kept.',
     ru: 'Тема {name} удалена в Telegram — убрал её из реестра. Папка {cwd} осталась.',
   },
-  session_down: {
-    en: 'topic {name}: the session is down — restarting it',
-    ru: 'тема {name}: сессия упала — перезапускаю',
-  },
+  session_down: { en: 'topic {name}: the session is down', ru: 'тема {name}: сессия упала' },
   session_up: { en: 'topic {name}: the session is back up', ru: 'тема {name}: сессия поднялась' },
   orca_down: {
     en: 'Orca is not answering on the session machine — sessions are not restarted until it does.',
     ru: 'Orca не отвечает на машине сессий — сессии не перезапускаю, пока не ответит.',
+  },
+  session_blocked_alive: {
+    en: 'topic {name}: the session is not connected, but its Claude process is still running in a terminal I cannot identify as mine ({cwd}). Not starting a second one — close the extra terminal in Orca and I will start it again.',
+    ru: 'тема {name}: сессия не на связи, но её процесс Claude ещё жив в терминале, который я не могу опознать как свой ({cwd}). Вторую не запускаю — закрой лишний терминал в Orca, дальше подниму сам.',
+  },
+  session_blocked_unknown: {
+    en: 'topic {name}: the session is not connected; I cannot count processes on the session machine, and {cwd} has a terminal I cannot identify as mine (it may be a restored copy of the session). Not starting a second one — once that folder has no extra terminals in Orca, I will start it again.',
+    ru: 'тема {name}: сессия не на связи; процессы на машине сессий проверить не могу, а в {cwd} открыт терминал, который я не могу опознать как свой (может быть восстановленной копией сессии). Вторую не запускаю — как только в этой папке в Orca не останется лишних терминалов, подниму сам.',
   },
 } satisfies Record<string, Record<Lang, string>>
 

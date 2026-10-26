@@ -17,12 +17,13 @@
 //        fails; the topic stays in Telegram and in the registry, and the
 //        sessions watchdog keeps retrying the folder and the session.
 //   INV: closing a topic unbinds its shim and stops restarts; deleting one
-//        drops it from the registry; neither ever touches its folder.
+//        closes its own terminals (proved by launch history), then drops it
+//        from the registry; neither ever touches its folder.
 
 import type { Update } from 'grammy/types'
 import type { BrokerContext, BrokerModule, ConnInfo } from './context.ts'
 import { initRunner } from './runner.ts'
-import { cleanTitle, ensure } from './sessions.ts'
+import { cleanTitle, closeTopicTerminals, ensure } from './sessions.ts'
 import { t } from './strings.ts'
 import { describeError } from './telegram.ts'
 
@@ -170,8 +171,16 @@ export async function probeTopics(ctx: BrokerContext): Promise<void> {
           ctx.log('probe_failed', { topic: row.name, err })
           continue
         }
-        ctx.store.deleteTopic(row.name)
         ctx.unbind(row.name, 'topic deleted')
+        // Close its session first: deleteTopic wipes the launch history that
+        // proves which terminals are ours, and a re-created topic of the same
+        // name would otherwise get a second Claude in the same folder.
+        try {
+          await closeTopicTerminals(row.name)
+        } catch (e) {
+          ctx.log('topic_terminals_close_failed', { topic: row.name, err: describeError(e) })
+        }
+        ctx.store.deleteTopic(row.name)
         ctx.log('topic_deleted', { topic: row.name, thread_id: thread })
         await ctx.notifyGeneral(t(ctx.config.lang, 'topic_deleted', { name: row.name, cwd: row.cwd ?? '-' }))
       }
