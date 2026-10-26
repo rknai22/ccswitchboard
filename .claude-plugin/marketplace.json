@@ -1,0 +1,22 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "ccswitchboard",
+  "description": "Telegram forum topics for Claude Code — one session per topic, an orchestrator in General.",
+  "owner": {
+    "name": "rknai22"
+  },
+  "plugins": [
+    {
+      "name": "ccswitchboard",
+      "source": "./plugin",
+      "description": "Channel shim: connects a Claude Code session to its Telegram topic through the ccswitchboard broker.",
+      "license": "Apache-2.0",
+      "keywords": [
+        "telegram",
+        "topics",
+        "channel",
+        "mcp"
+      ]
+    }
+  ]
+}

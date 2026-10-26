@@ -1,0 +1,14 @@
+{
+  "name": "ccswitchboard-channel",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "bin": "./server.ts",
+  "scripts": {
+    "start": "bun install --no-summary 1>&2 && bun server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}

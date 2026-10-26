@@ -1,0 +1,16 @@
+{
+  "name": "ccswitchboard",
+  "description": "Telegram forum topics for Claude Code: one Claude session per topic, an orchestrator in General. This is the channel shim; it talks to the ccswitchboard broker and holds no bot token. Set up with /ccswitchboard:setup.",
+  "version": "0.1.0",
+  "author": {
+    "name": "rknai22"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "telegram",
+    "topics",
+    "messaging",
+    "channel",
+    "mcp"
+  ]
+}
