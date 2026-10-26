@@ -63,6 +63,22 @@ const STRINGS = {
     en: 'The button expired. Take the bot\'s admin rights away and grant them again (or send the token again) — a new button will come.',
     ru: 'Кнопка истекла. Сними с бота права админа и выдай снова (или передай токен ещё раз) — придёт новая кнопка.',
   },
+  // ---- pinned limits message and the morning digest (pin.ts, digest.ts) ----
+  limits_title: { en: 'Claude limits', ru: 'Лимиты Claude' },
+  limits_five_hour: { en: '5 hours', ru: '5 часов' },
+  limits_week: { en: 'Week', ru: 'Неделя' },
+  limits_pct: { en: '{pct}%', ru: '{pct} %' },
+  limits_reset: { en: 'resets {at}', ru: 'сброс {at}' },
+  limits_no_data: { en: 'no data', ru: 'нет данных' },
+  limits_as_of: { en: 'Data as of {at}', ru: 'Данные на {at}' },
+  limits_stale: { en: 'no session has run since', ru: 'с тех пор сессии не работали' },
+  limits_short: { en: 'Limits: 5 h {five} · week {week}', ru: 'Лимиты: 5 ч {five} · неделя {week}' },
+  limits_short_as_of: { en: '(data as of {at})', ru: '(данные на {at})' },
+  digest_title: { en: 'Digest at {at}', ru: 'Сводка на {at}' },
+  digest_no_topics: { en: 'No topics yet.', ru: 'Тем пока нет.' },
+  digest_no_status: { en: 'no status', ru: 'нет статуса' },
+  digest_waiting: { en: 'waiting for your "yes": {item}', ru: 'ждёт твоего «да»: {item}' },
+  digest_more: { en: '…and {n} more', ru: '…и ещё {n}' },
 } satisfies Record<string, Record<Lang, string>>
 
 export type StringKey = keyof typeof STRINGS

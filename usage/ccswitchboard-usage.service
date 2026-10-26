@@ -1,0 +1,14 @@
+# Polls Claude usage limits for the ccswitchboard pinned message.
+# User unit on the session machine, run as the user Claude Code is signed in
+# as (it reads ~/.claude/.credentials.json). Adjust the bun path and the
+# checkout path below to your install.
+#   cp ccswitchboard-usage.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now ccswitchboard-usage.timer
+#   loginctl enable-linger "$USER"   # keep the timer running without a login
+[Unit]
+Description=ccswitchboard: poll Claude usage limits
+
+[Service]
+Type=oneshot
+ExecStart=%h/.bun/bin/bun %h/opt/ccswitchboard/usage/usage-poll.ts --out %h/.local/state/ccswitchboard/usage.json
+TimeoutStartSec=60

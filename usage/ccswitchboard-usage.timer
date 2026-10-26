@@ -1,0 +1,12 @@
+# Every 5 minutes: the broker re-reads the file on the same cadence and calls
+# data older than 15 minutes stale.
+[Unit]
+Description=ccswitchboard: poll Claude usage limits every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

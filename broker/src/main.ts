@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 // === GRACE START_BLOCK: broker_cli ============================================
 // MODULE_CONTRACT:
-//   IN:  argv: <serve|reset|status|key <topic>> --config <path>.
+//   IN:  argv: <serve|reset|status|key <topic>|digest --now> --config <path>.
 //   OUT: serve — runs the broker until SIGTERM/SIGINT;
 //        reset — wipes the setup without the Telegram button (lost bot),
 //          prints "reset done"; a running broker notices within ~5 s;
 //        status — setup state, bot, group, topic and queue counts;
-//        key <topic> — prints the topic's key (root or the DB owner only).
+//        key <topic> — prints the topic's key (root or the DB owner only);
+//        digest --now — builds the morning digest and sends it to General
+//          right away (does not count as the day's scheduled one).
 //   INV: status never prints the token or topic keys; only `key` prints a key.
 //   INV: umask 077 — every file the broker creates (DB, WAL, secret) is
 //        private to its user.
@@ -17,10 +19,13 @@ import { Broker } from './broker.ts'
 import { log } from './context.ts'
 import { Store } from './store.ts'
 import { wipeSetup } from './setup.ts'
+import { buildDigest } from './digest.ts'
+import { useRunner } from './pin.ts'
+import { Telegram, describeError } from './telegram.ts'
 
 process.umask(0o077)
 
-const USAGE = 'usage: ccswitchboard-broker <serve|reset|status|key <topic>> --config <path>'
+const USAGE = 'usage: ccswitchboard-broker <serve|reset|status|key <topic>|digest --now> --config <path>'
 
 function parseArgs(argv: string[]): { cmd: string; rest: string[]; config: string } {
   const rest: string[] = []
@@ -103,6 +108,35 @@ switch (cmd) {
       process.exit(1)
     }
     process.stdout.write(row.key + '\n')
+    break
+  }
+  case 'digest': {
+    if (rest[0] !== '--now') {
+      process.stderr.write(USAGE + '\n')
+      process.exit(2)
+    }
+    const s = readSecret(cfg)
+    if (!s?.locked || s.chat_id === undefined) {
+      process.stderr.write('digest: the broker is not configured yet\n')
+      process.exit(1)
+    }
+    ensureStateDir(cfg)
+    const store = new Store(cfg.state_dir)
+    useRunner(cfg.runner)
+    // A send-only client: no polling here, the serving broker keeps getUpdates.
+    const tg = new Telegram(cfg, store, { onUpdate: async () => {}, onConflict: () => {}, allowedUpdates: () => [] })
+    tg.setToken(s.bot_token)
+    try {
+      const text = await buildDigest(cfg, store, new Date(), (ev, f) => log('digest', ev, f))
+      const ids = await tg.sendInto(s.chat_id, null, text, { onSent: id => store.rememberMessage(id, 'general') })
+      log('digest', 'digest_sent_now', { messages: ids.length, len: text.length })
+      process.stdout.write(`digest sent (${ids.length} message${ids.length === 1 ? '' : 's'})\n`)
+    } catch (e) {
+      process.stderr.write(`digest: ${describeError(e)}\n`)
+      process.exitCode = 1
+    } finally {
+      store.close()
+    }
     break
   }
   default:
