@@ -65,6 +65,11 @@ export type BrokerContext = {
   owner(): { owner_id: number; chat_id: number } | null
   /** Tell the topic's connected shim it is no longer bound (topic closed). */
   unbind(topic: string, reason: string): void
+  /** A shim holding this topic's key is connected and bound right now. */
+  isConnected(topic: string): boolean
+  /** When (epoch ms) the topic's current shim connection was welcomed; null
+   *  when none is bound. */
+  connectedSince(topic: string): number | null
 }
 
 export type BrokerModule = {

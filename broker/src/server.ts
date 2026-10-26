@@ -41,6 +41,8 @@ class Conn {
   info: ConnInfo
   tools: ToolName[] = []
   bound = false
+  /** Epoch ms of the welcome; the session watchdog reads it. */
+  since = 0
   constructor(readonly sock: Socket, id: number) {
     this.info = { id, mode: 'setup' }
   }
@@ -96,6 +98,12 @@ export class BrokerServer {
 
   connectedTopics(): string[] {
     return [...this.byTopic.keys()]
+  }
+
+  /** Welcome time of the topic's bound connection, or null when none is. */
+  connectedSince(topic: string): number | null {
+    const c = this.byTopic.get(topic)
+    return c?.bound && !c.sock.destroyed ? c.since : null
   }
 
   private accept(sock: Socket): void {
@@ -181,6 +189,7 @@ export class BrokerServer {
     c.info = { id: c.info.id, mode: 'topic', topic: topic.name }
     c.tools = [...TOPIC_TOOLS, ...(topic.name === 'general' ? GENERAL_TOOLS : []), ...BOUND_SETUP_TOOLS]
     c.bound = true
+    c.since = Date.now()
     this.byTopic.set(topic.name, c)
     c.send({ t: 'welcome', mode: 'topic', topic: topic.name, tools: c.tools })
     const backlog = this.deps.store.undelivered(topic.name)

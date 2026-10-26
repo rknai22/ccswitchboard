@@ -88,6 +88,8 @@ export class Broker {
       isLocked: () => this.isLocked(),
       owner: () => (this.isLocked() ? { owner_id: this.sec!.owner_id!, chat_id: this.sec!.chat_id! } : null),
       unbind: (topic, reason) => this.server.unbind(topic, reason),
+      isConnected: topic => this.server.connectedSince(topic) !== null,
+      connectedSince: topic => this.server.connectedSince(topic),
     }
   }
 

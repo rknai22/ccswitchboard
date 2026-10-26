@@ -79,6 +79,24 @@ const STRINGS = {
   digest_no_status: { en: 'no status', ru: 'нет статуса' },
   digest_waiting: { en: 'waiting for your "yes": {item}', ru: 'ждёт твоего «да»: {item}' },
   digest_more: { en: '…and {n} more', ru: '…и ещё {n}' },
+  // ---- topics and sessions (topics.ts, sessions.ts) ----
+  forward_prefix: {
+    en: '📨 from the owner via General: {text}',
+    ru: '📨 от владельца через «Общий»: {text}',
+  },
+  topic_deleted: {
+    en: 'Topic {name} was deleted in Telegram — removed it from the registry. Its folder {cwd} is kept.',
+    ru: 'Тема {name} удалена в Telegram — убрал её из реестра. Папка {cwd} осталась.',
+  },
+  session_down: {
+    en: 'topic {name}: the session is down — restarting it',
+    ru: 'тема {name}: сессия упала — перезапускаю',
+  },
+  session_up: { en: 'topic {name}: the session is back up', ru: 'тема {name}: сессия поднялась' },
+  orca_down: {
+    en: 'Orca is not answering on the session machine — sessions are not restarted until it does.',
+    ru: 'Orca не отвечает на машине сессий — сессии не перезапускаю, пока не ответит.',
+  },
 } satisfies Record<string, Record<Lang, string>>
 
 export type StringKey = keyof typeof STRINGS

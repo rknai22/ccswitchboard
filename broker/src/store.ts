@@ -282,6 +282,20 @@ export class Store {
     }
   }
 
+  /** The topic is gone in Telegram: drop its row, queue, message map and the
+   *  modules' per-topic kv (keys "topic:<name>:…"). Folders are not ours to
+   *  delete and live elsewhere anyway. */
+  deleteTopic(name: string): void {
+    this.db.transaction(() => {
+      this.db.query('DELETE FROM topics WHERE name = ?').run(name)
+      this.db.query('DELETE FROM updates WHERE topic = ?').run(name)
+      this.db.query('DELETE FROM msg_topic WHERE topic = ?').run(name)
+      // substr, not LIKE: a topic name must never act as a pattern.
+      const p = `topic:${name}:`
+      this.db.query('DELETE FROM kv WHERE substr(key, 1, ?) = ?').run(p.length, p)
+    })()
+  }
+
   /** Setup reset: forget everything except poll offsets (they belong to the
    *  bot, not to the setup, and dropping one would replay old updates) and the
    *  local id counter (a shim that saw -1 before the reset must not dedup a
