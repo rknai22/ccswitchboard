@@ -18,6 +18,7 @@
 
 import type { Config, Lang } from './config.ts'
 import type { BrokerContext, BrokerModule } from './context.ts'
+import { initRunner, readSessionFile } from './runner.ts'
 import type { Store } from './store.ts'
 import { t } from './strings.ts'
 import { describeError } from './telegram.ts'
@@ -25,84 +26,8 @@ import { describeError } from './telegram.ts'
 const TICK_MS = 5 * 60_000
 const FIRST_TICK_MS = 5_000
 const STALE_MS = 15 * 60_000
-const READ_TIMEOUT_MS = 15_000
-const MAX_FILE_BYTES = 256 * 1024
 const KV_PIN = 'pin_message'
 const DEFAULT_USAGE_FILE = '~/.local/state/ccswitchboard/usage.json'
-
-// ---- session host (TEMPORARY copy) --------------------------------------------
-// Wave B1 owns broker/src/runner.ts with the same signature; until the
-// controller merges the two, pin.ts and digest.ts use this copy.
-
-export type RunResult = { code: number | null; stdout: string; stderr: string; timedOut: boolean }
-
-let runnerPrefix: string[] = []
-
-/** Set the argv prefix that reaches the session machine (config.runner). */
-export function useRunner(prefix: string[]): void {
-  runnerPrefix = [...prefix]
-}
-
-/** Runs argv on the session machine — an array, never a shell string, so
- *  topic names and paths stay data. Output is capped; on timeout the process
- *  is killed and timedOut is set. */
-export async function runOnSessionHost(argv: string[], opts: { input?: string; timeoutMs: number }): Promise<RunResult> {
-  const cmd = [...runnerPrefix, ...argv]
-  const proc = Bun.spawn(cmd, {
-    stdin: opts.input !== undefined ? new TextEncoder().encode(opts.input) : 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  const out = proc.stdout.getReader()
-  const err = proc.stderr.getReader()
-  let timedOut = false
-  let drop: ReturnType<typeof setTimeout> | undefined
-  const timer = setTimeout(() => {
-    timedOut = true
-    proc.kill('SIGKILL')
-    // A grandchild may still hold the pipes open: stop waiting for them.
-    drop = setTimeout(() => { void out.cancel().catch(() => {}); void err.cancel().catch(() => {}) }, 1000)
-  }, opts.timeoutMs)
-  try {
-    const [stdout, stderr] = await Promise.all([readCapped(out, MAX_FILE_BYTES + 1), readCapped(err, 16 * 1024)])
-    const code = await proc.exited
-    return { code: timedOut ? null : code, stdout, stderr, timedOut }
-  } finally {
-    clearTimeout(timer)
-    clearTimeout(drop)
-  }
-}
-
-async function readCapped(reader: { read(): Promise<{ done: boolean; value?: Uint8Array }> }, cap: number): Promise<string> {
-  const parts: Uint8Array[] = []
-  let n = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done || !value) break
-    // Keep draining past the cap so the child never blocks on a full pipe.
-    if (n < cap) parts.push(value.subarray(0, Math.min(value.length, cap - n)))
-    n += value.length
-  }
-  return Buffer.concat(parts).toString('utf8')
-}
-
-/**
- * A small file on the session machine, or null (absent, unreadable, too big,
- * timed out). `~/` is resolved by the session machine's own $HOME: the path
- * goes in as a positional argument, never spliced into the script.
- */
-export async function readSessionFile(path: string, timeoutMs = READ_TIMEOUT_MS): Promise<string | null> {
-  const argv = path.startsWith('~/')
-    ? ['sh', '-c', 'exec cat -- "$HOME/$1"', 'sh', path.slice(2)]
-    : ['cat', '--', path]
-  try {
-    const r = await runOnSessionHost(argv, { timeoutMs })
-    if (r.code !== 0 || Buffer.byteLength(r.stdout) > MAX_FILE_BYTES) return null
-    return r.stdout
-  } catch {
-    return null
-  }
-}
 
 // ---- clock --------------------------------------------------------------------
 
@@ -319,7 +244,7 @@ async function tick(ctx: BrokerContext, why: string): Promise<void> {
 export const pinModule: BrokerModule = {
   name: 'pin',
   start(ctx) {
-    useRunner(ctx.config.runner)
+    initRunner(ctx.config)
     // The core sets the bot token only after modules start: give it a moment.
     setTimeout(() => void tick(ctx, 'start'), FIRST_TICK_MS)
     setInterval(() => void tick(ctx, 'timer'), TICK_MS)

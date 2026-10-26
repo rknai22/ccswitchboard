@@ -18,7 +18,8 @@
 import type { Config } from './config.ts'
 import type { BrokerContext, BrokerModule } from './context.ts'
 import type { Store, TopicRow } from './store.ts'
-import { formatClock, limitsShort, loadUsage, localNow, readSessionFile, useRunner } from './pin.ts'
+import { formatClock, limitsShort, loadUsage, localNow } from './pin.ts'
+import { initRunner, readSessionFile } from './runner.ts'
 import { t } from './strings.ts'
 import { describeError } from './telegram.ts'
 
@@ -128,7 +129,7 @@ async function check(ctx: BrokerContext): Promise<void> {
 export const digestModule: BrokerModule = {
   name: 'digest',
   start(ctx) {
-    useRunner(ctx.config.runner)
+    initRunner(ctx.config)
     if (!DIGEST_AT.test(ctx.config.digest_at.trim())) {
       ctx.log('digest_at_invalid', { len: ctx.config.digest_at.length, fallback: '10:00' })
     }

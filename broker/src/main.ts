@@ -20,7 +20,7 @@ import { log } from './context.ts'
 import { Store } from './store.ts'
 import { wipeSetup } from './setup.ts'
 import { buildDigest } from './digest.ts'
-import { useRunner } from './pin.ts'
+import { initRunner } from './runner.ts'
 import { Telegram, describeError } from './telegram.ts'
 
 process.umask(0o077)
@@ -122,7 +122,7 @@ switch (cmd) {
     }
     ensureStateDir(cfg)
     const store = new Store(cfg.state_dir)
-    useRunner(cfg.runner)
+    initRunner(cfg)
     // A send-only client: no polling here, the serving broker keeps getUpdates.
     const tg = new Telegram(cfg, store, { onUpdate: async () => {}, onConflict: () => {}, allowedUpdates: () => [] })
     tg.setToken(s.bot_token)
