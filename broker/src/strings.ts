@@ -106,6 +106,10 @@ const STRINGS = {
     en: 'topic {name}: the session is alive but cannot reach the broker (network from the session machine to the broker?). Not restarting it, so its work and conversation are kept.',
     ru: 'тема {name}: сессия жива, но не на связи с брокером (сеть машины сессий → брокер?). Не перезапускаю, чтобы не потерять её работу и разговор.',
   },
+  takeover_refused: {
+    en: 'topic {name}: another copy of the plugin tried to take the topic (e.g. `claude mcp list` inside the session); the live session kept it.',
+    ru: 'тема {name}: другая копия плагина пыталась забрать тему (например, `claude mcp list` внутри сессии); живая сессия её удержала.',
+  },
   topic_closed_hint: {
     en: 'This topic is closed — reopen it to continue.',
     ru: 'Тема закрыта — открой её, чтобы продолжить.',

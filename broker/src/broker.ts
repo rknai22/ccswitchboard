@@ -58,6 +58,7 @@ export class Broker {
       store: this.store,
       isLocked: () => this.isLocked(),
       handle: (tool, args, conn) => this.handleTool(tool, args, conn),
+      onTakeoverRefused: topic => this.onTakeoverRefused(topic),
     })
     this.setup = new Setup({
       cfg,
@@ -277,6 +278,13 @@ export class Broker {
     void this.tg.enqueue(chat, false, api =>
       api.sendChatAction(chat, 'typing', threadId !== null ? { message_thread_id: threadId } : {}),
     ).catch(() => {})
+  }
+
+  private onTakeoverRefused(topic: string): void {
+    const key = `topic:${topic}:takeover_notice_at`
+    if (Date.now() - Number(this.store.get(key) ?? 0) < CLOSED_HINT_EVERY_MS) return
+    this.store.set(key, Date.now())
+    void this.notifyGeneral(t(this.cfg.lang, 'takeover_refused', { name: topic }))
   }
 
   private onConflict(description: string): void {

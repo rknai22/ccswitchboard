@@ -4,23 +4,35 @@
 //        (plugin/protocol.ts). First line must be hello within 10 s.
 //   OUT: welcome{topic|setup} or reject+close; events of the bound topic in
 //        queue order; results of tool calls; unbound on reset/topic close.
-//   INV: one connection per topic — a new hello with the same key replaces the
-//        old connection (it gets unbound): a restarted session must not lose
-//        its topic to a half-dead predecessor.
+//   INV: one connection per topic. A new hello with the same key takes the
+//        topic only when the old connection is dead: one that knows ping is
+//        asked first and keeps the topic if it answers within pingWaitMs (a
+//        stray second shim — e.g. from `claude mcp list` — must not deafen a
+//        live session); one that does not know ping is replaced as before (a
+//        restarted session must not lose its topic to a half-dead
+//        predecessor). Hellos of one topic are decided one at a time.
 //   INV: an event counts as delivered only on the shim's ack; on (re)connect
 //        every unacked event of the topic is sent again, in order.
 //   INV: a call for a tool missing from the connection's welcome.tools is
 //        refused here, before any handler runs.
 
+import { randomUUID } from 'crypto'
 import { createServer, type Server, type Socket } from 'net'
 import {
   LineDecoder, PROTOCOL_VERSION, encode, parseBrokerAddr,
-  type BrokerToShim, type GeneralTools, type SetupTools, type ToolName, type TopicTools,
+  type BrokerToShim, type Capability, type GeneralTools, type SetupTools, type ToolName, type TopicTools,
 } from '../../plugin/protocol.ts'
 import { log, type ConnInfo } from './context.ts'
 import type { Store, StoredEvent } from './store.ts'
 
 const HELLO_TIMEOUT_MS = 10_000
+const CAPS: Capability[] = ['ping', 'redelivery']
+
+export const serverTiming = {
+  /** How long a live shim has to answer ping; generous because a shim busy
+   *  sending a big file answers late. */
+  pingWaitMs: 10_000,
+}
 // Biggest legit line: a reply with several 50 MB files in base64.
 const MAX_LINE_CHARS = 400 * 1024 * 1024
 
@@ -35,6 +47,8 @@ export type ServerDeps = {
   store: Store
   isLocked(): boolean
   handle(tool: ToolName, args: unknown, conn: ConnInfo): Promise<unknown>
+  /** A hello was refused because the topic's shim answered ping. */
+  onTakeoverRefused?(topic: string): void
 }
 
 class Conn {
@@ -43,6 +57,9 @@ class Conn {
   bound = false
   /** Epoch ms of the welcome; the session watchdog reads it. */
   since = 0
+  caps = new Set<Capability>()
+  instance: string | undefined
+  pongs = new Map<string, () => void>()
   constructor(readonly sock: Socket, id: number) {
     this.info = { id, mode: 'setup' }
   }
@@ -56,6 +73,7 @@ export class BrokerServer {
   private nextId = 1
   private byTopic = new Map<string, Conn>()
   private conns = new Set<Conn>()
+  private helloChains = new Map<string, Promise<void>>()
 
   constructor(private deps: ServerDeps) {}
 
@@ -161,7 +179,7 @@ export class BrokerServer {
   }
 
   private hello(c: Conn, m: unknown): void {
-    const h = m as { t?: unknown; v?: unknown; key?: unknown }
+    const h = m as { t?: unknown; v?: unknown; key?: unknown; instance?: unknown; caps?: unknown }
     if (h?.t !== 'hello') return this.reject(c, 'expected hello')
     if (h.v !== PROTOCOL_VERSION) return this.reject(c, `unsupported protocol version ${String(h.v)} (broker speaks ${PROTOCOL_VERSION})`)
 
@@ -179,26 +197,71 @@ export class BrokerServer {
     if (!topic) return this.reject(c, 'unknown topic key')
     if (topic.state !== 'open') return this.reject(c, `topic ${topic.name} is closed`)
 
-    const old = this.byTopic.get(topic.name)
-    if (old && old !== c) {
-      old.bound = false
-      old.send({ t: 'unbound', reason: 'replaced by a newer connection for this topic' })
-      old.sock.end()
-      log('server', 'replaced', { conn: old.info.id, by: c.info.id, topic: topic.name })
+    c.caps = new Set(Array.isArray(h.caps) ? h.caps.filter((x): x is Capability => CAPS.includes(x)) : [])
+    c.instance = typeof h.instance === 'string' && h.instance ? h.instance.slice(0, 64) : undefined
+    const name = topic.name
+    const prev = this.helloChains.get(name) ?? Promise.resolve()
+    const run = prev.then(() => this.claim(c, name))
+    this.helloChains.set(name, run.catch(() => {}))
+  }
+
+  /** Give the topic to c unless a live connection holds it. */
+  private async claim(c: Conn, name: string): Promise<void> {
+    if (c.sock.destroyed) return
+    const topic = this.deps.store.topic(name)
+    if (!topic || topic.state !== 'open') return this.reject(c, `topic ${name} is closed`)
+    const old = this.byTopic.get(name)
+    if (old && old !== c && old.bound && !old.sock.destroyed && old.caps.has('ping')) {
+      const alive = await this.ping(old, serverTiming.pingWaitMs)
+      if (c.sock.destroyed) return
+      if (alive && this.byTopic.get(name) === old && old.bound) {
+        log('server', 'takeover_refused', { conn: c.info.id, holder: old.info.id, topic: name })
+        this.deps.onTakeoverRefused?.(name)
+        return this.reject(c, `topic ${name} is held by a live session`)
+      }
     }
-    c.info = { id: c.info.id, mode: 'topic', topic: topic.name }
-    c.tools = [...TOPIC_TOOLS, ...(topic.name === 'general' ? GENERAL_TOOLS : []), ...BOUND_SETUP_TOOLS]
+    const cur = this.byTopic.get(name)
+    if (cur && cur !== c) {
+      cur.bound = false
+      cur.send({ t: 'unbound', reason: 'replaced by a newer connection for this topic' })
+      cur.sock.end()
+      log('server', 'replaced', { conn: cur.info.id, by: c.info.id, topic: name })
+    }
+    c.info = { id: c.info.id, mode: 'topic', topic: name }
+    c.tools = [...TOPIC_TOOLS, ...(name === 'general' ? GENERAL_TOOLS : []), ...BOUND_SETUP_TOOLS]
     c.bound = true
     c.since = Date.now()
-    this.byTopic.set(topic.name, c)
-    c.send({ t: 'welcome', mode: 'topic', topic: topic.name, tools: c.tools })
-    const backlog = this.deps.store.undelivered(topic.name)
+    this.byTopic.set(name, c)
+    c.send({ t: 'welcome', mode: 'topic', topic: name, tools: c.tools })
+    const backlog = this.deps.store.undelivered(name)
     for (const ev of backlog) c.send({ t: 'event', ...ev })
-    log('server', 'welcome', { conn: c.info.id, mode: 'topic', topic: topic.name, backlog: backlog.length })
+    log('server', 'welcome', { conn: c.info.id, mode: 'topic', topic: name, backlog: backlog.length, caps: [...c.caps].join(',') || null })
+  }
+
+  /** true when c answers a fresh ping within ms; false on timeout or close. */
+  private ping(c: Conn, ms: number): Promise<boolean> {
+    const nonce = randomUUID()
+    return new Promise(res => {
+      const done = (v: boolean) => {
+        clearTimeout(timer)
+        c.pongs.delete(nonce)
+        c.sock.off('close', onClose)
+        res(v)
+      }
+      const onClose = () => done(false)
+      const timer = setTimeout(() => done(false), ms)
+      c.pongs.set(nonce, () => done(true))
+      c.sock.on('close', onClose)
+      c.send({ t: 'ping', nonce })
+    })
   }
 
   private message(c: Conn, m: unknown): void {
-    const msg = m as { t?: unknown; update_id?: unknown; id?: unknown; tool?: unknown; args?: unknown }
+    const msg = m as { t?: unknown; update_id?: unknown; id?: unknown; tool?: unknown; args?: unknown; nonce?: unknown }
+    if (msg?.t === 'pong') {
+      if (typeof msg.nonce === 'string') c.pongs.get(msg.nonce)?.()
+      return
+    }
     if (msg?.t === 'ack') {
       if (c.info.mode !== 'topic' || !c.bound || typeof msg.update_id !== 'number') return
       const ok = this.deps.store.markDelivered(c.info.topic!, msg.update_id)
