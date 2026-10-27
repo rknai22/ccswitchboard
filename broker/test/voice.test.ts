@@ -74,3 +74,30 @@ test('a voice message reaches the session as 🎤 text, attachment kept', async 
   expect(b.store.undelivered('wms')[0]!.text).toBe('🎤 привет, проверь логи')
   b.stop()
 })
+
+test('a text after a voice message waits for the transcript: order kept', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(r => (release = r))
+  reply = () => Response.json({ text: 'first' })
+  const c = cfg()
+  const b = new Broker({ ...c, state_dir: tmp.dir, listen: '127.0.0.1:1', api_root: '' } as any, [])
+  ;(b as any).sec = { bot_token: 't', owner_id: 42, chat_id: -100, locked: true }
+  b.store.createTopic({ name: 'wms', chat_id: -100, thread_id: 7 })
+  ;(b.tg as any).download = async () => { await gate; return file }
+  ;(b.tg as any).enqueue = async () => true
+  ;(b.tg as any).botId = () => 'bot'
+  const pushed: any[] = []
+  ;(b.server as any).push = (ev: any) => pushed.push(ev)
+  const msg = (id: number, extra: object) => ({
+    update_id: id,
+    message: { message_id: id, date: 0, chat: { id: -100, type: 'supergroup' }, from: { id: 42, is_bot: false, first_name: 'o' }, is_topic_message: true, message_thread_id: 7, ...extra },
+  })
+  await (b as any).handleUpdate(msg(60, { voice: { file_id: 'F', file_unique_id: 'U', duration: 3 } }))
+  await (b as any).handleUpdate(msg(61, { text: 'second' }))
+  await sleep(50)
+  expect(pushed).toHaveLength(0)
+  release()
+  for (let i = 0; i < 50 && pushed.length < 2; i++) await sleep(20)
+  expect(pushed.map(e => e.text)).toEqual(['🎤 first', 'second'])
+  b.stop()
+})

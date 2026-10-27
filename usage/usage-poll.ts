@@ -150,6 +150,8 @@ function codexWindow(v: unknown): { minutes: number; w: Window } | null {
   const o = v as Record<string, unknown> | null
   if (!o || typeof o.used_percent !== 'number' || typeof o.window_minutes !== 'number') return null
   const r = typeof o.resets_at === 'number' ? new Date(o.resets_at * 1000).toISOString() : null
+  // The window reset since Codex last saw it: nothing used in the new one yet.
+  if (r && Date.parse(r) <= Date.now()) return { minutes: o.window_minutes, w: { pct: 0, resets_at: null } }
   return { minutes: o.window_minutes, w: { pct: o.used_percent, resets_at: r } }
 }
 

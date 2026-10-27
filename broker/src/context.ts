@@ -85,6 +85,8 @@ export type BrokerModule = {
   /** raw Telegram update after the core saw it; return true if handled */
   onUpdate?(u: Update, ctx: BrokerContext): boolean | Promise<boolean>
   onLocked?(ctx: BrokerContext): void | Promise<void>
+  /** broker shutdown: stop child processes and servers */
+  stop?(): void
   /** handlers for tools the core leaves to modules (create_topic, forward) */
   tools?: Partial<Record<ToolName, (args: any, conn: ConnInfo, ctx: BrokerContext) => Promise<unknown>>>
 }

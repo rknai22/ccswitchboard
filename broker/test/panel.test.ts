@@ -72,3 +72,8 @@ test('usage file with codex limits → parsed and pinned', () => {
   const pin = renderPin({ lang: 'en', timezone: 'UTC' } as any, u, new Date('2026-10-28T00:01:00Z'))
   expect(pin).toContain('ChatGPT (Codex) limits')
 })
+
+test('initData older than an hour no longer opens the panel', async () => {
+  const old = initData(42, Math.floor(Date.now() / 1000) - 2 * 3600)
+  expect((await handle(req('/api/state', old), ctx)).status).toBe(401)
+})

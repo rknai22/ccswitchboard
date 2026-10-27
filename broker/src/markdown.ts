@@ -104,7 +104,7 @@ export function mdChunks(md: string, limit = CHUNK_MD): string[] {
   const lines = md.split('\n')
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i]!
-    const opens = fence === null && FENCE.test(line)
+    const opens = fence === null && line.length < 100 && FENCE.test(line)
     const closes = fence !== null && FENCE_END.test(line)
     // At a blank line outside a fence: cut here when the next paragraph would
     // not fit, rather than in its middle.
@@ -122,7 +122,10 @@ export function mdChunks(md: string, limit = CHUNK_MD): string[] {
         continue
       }
       // A single line longer than a chunk: cut it.
-      const n = Math.max(1, room() - 1)
+      let n = Math.max(1, room() - 1)
+      // Never between the two halves of an emoji (a surrogate pair).
+      const code = line.charCodeAt(n - 1)
+      if (n > 1 && code >= 0xd800 && code <= 0xdbff) n--
       push(line.slice(0, n))
       line = line.slice(n)
       flush()

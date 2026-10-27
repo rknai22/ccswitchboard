@@ -302,7 +302,7 @@ export class Telegram {
     if (file.file_size !== undefined && file.file_size > MAX_DOWNLOAD_BYTES) {
       throw new Error(`file too large for a bot download: ${(file.file_size / 1024 / 1024).toFixed(1)}MB, max 20MB`)
     }
-    const res = await fetch(`${this.cfg.api_root}/file/bot${this.token}/${file.file_path}`)
+    const res = await fetch(`${this.cfg.api_root}/file/bot${this.token}/${file.file_path}`, { signal: AbortSignal.timeout(60_000) })
     if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
     const buf = Buffer.from(await res.arrayBuffer())
     if (buf.length > MAX_DOWNLOAD_BYTES) throw new Error('file too large for a bot download (max 20MB)')

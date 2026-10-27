@@ -22,7 +22,9 @@ import { requestRestart, sendEscape } from './sessions.ts'
 import { t } from './strings.ts'
 import { listTasks, view } from './tasks.ts'
 
-const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/
+// The quick tunnel's own host — never api.trycloudflare.com, which cloudflared
+// also prints when it fails to get a tunnel.
+const TUNNEL_URL_RE = /https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/
 
 let ctxRef: BrokerContext | null = null
 let server: ReturnType<typeof Bun.serve> | null = null
@@ -167,6 +169,7 @@ export const panelModule: BrokerModule = {
     const url = panelUrl(c)
     if (url) await setMenuButton(c, url)
   },
+  stop: () => stopPanel(),
 }
 
 /** For tests and shutdown. */
@@ -202,11 +205,11 @@ try { tg && tg.setHeaderColor('#0f1115'); tg && tg.setBackgroundColor('#0f1115')
 const T = {
   ru:{codex:'Лимиты ChatGPT',limits:'Лимиты Claude',five:'5 часов',week:'Неделя',asof:'на',up:'на связи',down:'не на связи',busy:'работает',idle:'свободна',
       pending:'ждут доставки',noTasks:'задач нет',min:'мин назад',restart:'Перезапустить',stop:'Стоп',sent:'Готово',
-      forbidden:'Открой панель из Telegram (кнопка в личке с ботом).',confirmStop:'Прервать текущую работу сессии',confirmRestart:'Перезапустить сессию',
+      forbidden:'Открой панель заново из Telegram (кнопка в личке с ботом) — вход действует час.',confirmStop:'Прервать текущую работу сессии',confirmRestart:'Перезапустить сессию',
       states:{proposed:'📝',assigned:'📋',in_progress:'⚙️',waiting_owner:'⏳',blocked:'🟥',done:'✅',cancelled:'✖️'}},
   en:{codex:'ChatGPT limits',limits:'Claude limits',five:'5 hours',week:'Week',asof:'as of',up:'connected',down:'not connected',busy:'working',idle:'idle',
       pending:'waiting for delivery',noTasks:'no tasks',min:'min ago',restart:'Restart',stop:'Stop',sent:'Done',
-      forbidden:'Open the panel from Telegram (the button in the private chat with the bot).',confirmStop:'Interrupt the session\'s current work',confirmRestart:'Restart the session',
+      forbidden:'Open the panel again from Telegram (the button in the private chat with the bot) — a login lasts an hour.',confirmStop:'Interrupt the session\'s current work',confirmRestart:'Restart the session',
       states:{proposed:'📝',assigned:'📋',in_progress:'⚙️',waiting_owner:'⏳',blocked:'🟥',done:'✅',cancelled:'✖️'}},
 }
 let L = T.ru

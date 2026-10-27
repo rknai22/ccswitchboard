@@ -161,5 +161,12 @@ test('loud notices are capped per topic per hour', async () => {
   const r = await call('report', { title: 'N', state: 'in_progress', summary: 's' }, wms)
   const before = sent.length
   for (let i = 0; i < taskLimits.noticesPerHour + 3; i++) await call('report', { task_id: r.task_id, state: 'blocked', summary: `b${i}` }, wms)
-  expect(sent.length - before).toBe(taskLimits.noticesPerHour)
+  // The cap, plus one note that the rest of the hour is muted.
+  expect(sent.length - before).toBe(taskLimits.noticesPerHour + 1)
+  expect(sent.at(-1)!.text).toContain('muted')
+})
+
+test('>>> in a spec does not survive as a collapsed quote', async () => {
+  await call('propose_task', { topic: 'wms', title: 'Q3', spec: '>>> hidden' }, general)
+  expect(sent.at(-1)!.text).not.toContain('expandable')
 })

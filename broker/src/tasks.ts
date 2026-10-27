@@ -168,9 +168,9 @@ async function proposeTask(a: Record<string, unknown>, conn: ConnInfo, c: Broker
   if (row.state !== 'open') throw new Error(`propose_task: topic ${topic} is closed`)
   const title = cap(a.title, taskLimits.titleChars)
   const raw = typeof a.spec === 'string' ? a.spec.trim() : ''
-  if (raw.length > taskLimits.specChars) throw new Error(`propose_task: spec is ${raw.length} chars; keep it under ${taskLimits.specChars} so the owner sees all of it on one screen (put long material in the topic's repo and point to it)`)
+  if (raw.length + cap(a.title, taskLimits.titleChars).length > taskLimits.specChars) throw new Error(`propose_task: title + spec are ${raw.length} chars; keep them under ${taskLimits.specChars} so the owner sees all of it on one screen (put long material in the topic's repo and point to it)`)
   // No collapsed quotes: the owner must see every line they approve.
-  const spec = raw.replace(/^>>/gm, '>')
+  const spec = raw.replace(/^>{2,}/gm, '>')
   if (!title || !spec) throw new Error('propose_task: title and spec are required')
   const id = insertTask({ topic, title, spec, state: 'proposed', source: 'general' })
   event(id, 'general', 'proposed')
@@ -256,6 +256,12 @@ function noticeAllowed(topic: string): boolean {
   const recent = (noticeLog.get(topic) ?? []).filter(x => now - x < 3600_000)
   if (recent.length >= taskLimits.noticesPerHour) {
     ctx().log('task_notice_suppressed', { topic })
+    // Say once that the rest of the hour is muted, so nothing waits unseen.
+    if (recent.length === taskLimits.noticesPerHour) {
+      recent.push(now)
+      noticeLog.set(topic, recent)
+      void ctx().notifyGeneral(t(ctx().config.lang, 'task_notices_muted', { topic }))
+    }
     return false
   }
   recent.push(now)

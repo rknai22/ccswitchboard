@@ -72,6 +72,8 @@ export class Broker {
   readonly setup: Setup
   private sec: Secret | null
   private timers: ReturnType<typeof setInterval>[] = []
+  /** topic → the chain holding its events behind a voice transcription */
+  private holds = new Map<string, Promise<void>>()
   /** topic → its "typing…" loop while the session works */
   private typingLoops = new Map<string, { timer: ReturnType<typeof setInterval>; until: number }>()
   private base: BrokerContext
@@ -125,7 +127,9 @@ export class Broker {
       isLocked: () => this.isLocked(),
       owner: () => (this.isLocked() ? { owner_id: this.sec!.owner_id!, chat_id: this.sec!.chat_id! } : null),
       isBusy: topic => this.isTyping(topic),
-      verifyWebApp: initData => (this.sec ? verifyInitData(initData, this.sec.bot_token) : null),
+      // An hour: the panel is reachable through a tunnel, a captured header
+      // must not stay good for a day.
+      verifyWebApp: initData => (this.sec ? verifyInitData(initData, this.sec.bot_token, 3600) : null),
       pending: topic => this.store.undelivered(topic).length,
       unbind: (topic, reason) => this.server.unbind(topic, reason),
       isConnected: topic => this.server.connectedSince(topic) !== null,
@@ -162,6 +166,9 @@ export class Broker {
   }
 
   stop(): void {
+    for (const m of this.mods) {
+      try { m.stop?.() } catch {}
+    }
     for (const topic of [...this.typingLoops.keys()]) this.stopTyping(topic)
     for (const tm of this.timers) clearInterval(tm)
     this.setup.stop()
@@ -227,8 +234,20 @@ export class Broker {
         const fresh = this.store.ingest(botId, r.ev)
         log('core', 'event', { update_id: u.update_id, topic: r.ev.topic, message_id: r.ev.message_id, len: r.ev.text.length, fresh })
         if (fresh) {
-          if (r.ev.attachment && VOICE_KINDS.includes(r.ev.attachment.kind) && openaiKey(this.cfg)) void this.transcribeThenPush(r.ev)
-          else this.server.push(r.ev)
+          const ev = r.ev
+          const voice = !!ev.attachment && VOICE_KINDS.includes(ev.attachment.kind) && !!openaiKey(this.cfg)
+          const held = this.holds.get(ev.topic)
+          if (voice || held) {
+            // In order: while a voice message is being transcribed, later
+            // messages of its topic wait behind it.
+            const run = (held ?? Promise.resolve())
+              .then(() => (voice ? this.transcribeThenPush(ev) : this.pushIfUndelivered(ev)))
+              .catch(e => log('core', 'hold_failed', { update_id: ev.update_id, err: describeError(e) }))
+            this.holds.set(ev.topic, run)
+            void run.then(() => { if (this.holds.get(ev.topic) === run) this.holds.delete(ev.topic) })
+          } else {
+            this.server.push(ev)
+          }
           this.typing(u.message, r.threadId)
         }
         return
@@ -328,6 +347,11 @@ export class Broker {
     }
     // Delivered meanwhile (a backlog after a reconnect): leave it as it went.
     if (this.store.updateUndelivered(out)) this.server.push(out)
+  }
+
+  /** A held event: push it unless a reconnect's backlog delivered it already. */
+  private pushIfUndelivered(ev: StoredEvent): void {
+    if (this.store.undelivered(ev.topic).some(x => x.update_id === ev.update_id)) this.server.push(ev)
   }
 
   /** 👀 once the topic's shim acked the owner's message — fire and forget. */
@@ -510,7 +534,8 @@ export class Broker {
         const text = a.text as string
         if (fmt === 'markdown') {
           // An edit is one message: the first chunk only, converted whole.
-          const first = mdChunks(text)[0] ?? text
+          const parts = mdChunks(text)
+          const first = (parts[0] ?? text) + (parts.length > 1 ? '\n…' : '')
           await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(first), { parse_mode: 'HTML' }))
             .catch(e => {
               if (!isParseError(e)) throw e
