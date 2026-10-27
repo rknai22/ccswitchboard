@@ -117,3 +117,14 @@ test('same update_id twice → one notification, two acks', async () => {
   await sleep(50)
   expect(notes.filter(x => x.method === 'notifications/claude/channel').length).toBe(1)
 })
+
+test('quote text and forward origin reach the meta, cleaned', async () => {
+  await broker.next('hello')
+  broker.send(ev(11, { reply_to: { message_id: 3, text: 'line1\n<tag>' }, forwarded_from: { from: 'Ann (@ann)', date: '2026-10-28T00:00:00.000Z' } }))
+  await broker.next('ack')
+  await sleep(50)
+  const meta = notes.find(x => x.method === 'notifications/claude/channel').params.meta
+  expect(meta.reply_to_text).toBe('line1 ⏎ _tag_')
+  expect(meta.forwarded_from).toBe('Ann (@ann)')
+  expect(meta.forwarded_date).toBe('2026-10-28T00:00:00.000Z')
+})

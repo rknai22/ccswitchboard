@@ -275,6 +275,8 @@ export class Broker {
       text: content.text,
       ...(content.attachment ? { attachment: content.attachment } : {}),
     }
+    const fo = forwardOrigin(m)
+    if (fo) ev.forwarded_from = fo
     const rt = m.reply_to_message
     // Inside a topic every message "replies" to the topic's creation message;
     // that is structure, not a quote.
@@ -448,6 +450,31 @@ export class Broker {
     }
     throw new Error(`${tool}: not implemented yet`)
   }
+}
+
+/** Who wrote a message the owner forwarded from elsewhere. */
+export function forwardOrigin(m: Pick<Message, 'forward_origin'>): { from: string; date?: string } | undefined {
+  const o = m.forward_origin
+  if (!o) return undefined
+  let from: string
+  switch (o.type) {
+    case 'user':
+      from = [o.sender_user.first_name, o.sender_user.last_name].filter(Boolean).join(' ') +
+        (o.sender_user.username ? ` (@${o.sender_user.username})` : '')
+      break
+    case 'hidden_user':
+      from = o.sender_user_name
+      break
+    case 'chat':
+      from = o.sender_chat.title ?? 'chat'
+      break
+    case 'channel':
+      from = (o.chat.title ?? 'channel') + (o.author_signature ? ` — ${o.author_signature}` : '')
+      break
+    default:
+      from = 'unknown'
+  }
+  return { from: (safeName(from) ?? '').slice(0, 200) || 'unknown', ...(o.date ? { date: new Date(o.date * 1000).toISOString() } : {}) }
 }
 
 /** reply/edit format; absent = markdown (the default since the UX block). */

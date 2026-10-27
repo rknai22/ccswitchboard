@@ -77,6 +77,9 @@ export type InboundEvent = {
   forwarded_from_general?: { message_id: number }
   /** Present when the owner quote-replied to an earlier message. */
   reply_to?: { message_id: number; text?: string }
+  /** The owner forwarded this from another chat: who wrote it (cleaned of
+   *  tag delimiters by the broker) and when (ISO 8601). */
+  forwarded_from?: { from: string; date?: string }
   /** Sent again to a new shim instance: the previous one acked it, but its
    *  session may have died before Claude kept it. Only to caps 'redelivery'. */
   redelivered?: true
