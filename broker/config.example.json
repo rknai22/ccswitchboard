@@ -9,6 +9,10 @@
   "claude_cmd": "claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions",
   "usage_file": "",
   "heal": false,
+  "panel_listen": "",
+  "panel_url": "",
+  "panel_tunnel": "",
+  "cloudflared": "cloudflared",
   "timezone": "Europe/Moscow",
   "digest_at": "10:00"
 }

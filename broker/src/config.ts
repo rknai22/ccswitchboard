@@ -29,6 +29,14 @@ export type Config = {
   /** heal a live Claude whose plugin died (/mcp → Reconnect); off until the
    *  external ccsb-mcp-heal timer is switched off — only one healer at a time */
   heal: boolean
+  /** host:port of the owner's panel (Mini App) web server; '' = off */
+  panel_listen: string
+  /** public https URL of the panel when it is served some other way */
+  panel_url: string
+  /** 'cloudflared' = run a Cloudflare quick tunnel to panel_listen and follow
+   *  its (changing) URL; '' = none */
+  panel_tunnel: string
+  cloudflared: string
   timezone: string
   digest_at: string
 }
@@ -50,6 +58,10 @@ const DEFAULTS: Config = {
   projects_root: '~/projects',
   claude_cmd: 'claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions',
   heal: false,
+  panel_listen: '',
+  panel_url: '',
+  panel_tunnel: '',
+  cloudflared: 'cloudflared',
   timezone: 'Europe/Moscow',
   digest_at: '10:00',
 }

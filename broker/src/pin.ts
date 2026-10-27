@@ -84,6 +84,9 @@ export type Usage = {
   five_hour: UsageWindow | null
   week: UsageWindow | null
   error?: string
+  /** ChatGPT/Codex limits as the Codex CLI last saw them (independent of the
+   *  Claude error above). */
+  codex?: { five_hour: UsageWindow | null; week: UsageWindow | null; as_of: Date | null } | null
 }
 
 function parseDate(v: unknown): Date | null {
@@ -112,10 +115,12 @@ export function parseUsage(raw: string | null): Usage {
   if (!j || typeof j !== 'object' || Array.isArray(j)) return { ts: null, five_hour: null, week: null, error: 'bad_json' }
   const o = j as Record<string, unknown>
   const ts = parseDate(o.ts)
+  const cx = o.codex && typeof o.codex === 'object' ? (o.codex as Record<string, unknown>) : null
+  const codex = cx ? { five_hour: parseWindow(cx.five_hour), week: parseWindow(cx.week), as_of: parseDate(cx.as_of) } : null
   if (o.error !== undefined && o.error !== null) {
-    return { ts, five_hour: null, week: null, error: typeof o.error === 'string' ? o.error.slice(0, 64) : 'error' }
+    return { ts, five_hour: null, week: null, error: typeof o.error === 'string' ? o.error.slice(0, 64) : 'error', codex }
   }
-  return { ts, five_hour: parseWindow(o.five_hour), week: parseWindow(o.week) }
+  return { ts, five_hour: parseWindow(o.five_hour), week: parseWindow(o.week), codex }
 }
 
 export async function loadUsage(cfg: Config): Promise<Usage> {
@@ -155,6 +160,10 @@ export function renderPin(cfg: Config, u: Usage, now: Date): string {
   const out = [t(L, 'limits_title'), line('limits_five_hour', u.five_hour, false), line('limits_week', u.week, true)]
   if (u.ts) out.push(t(L, 'limits_as_of', { at: asOf(cfg, u.ts, now) }))
   if (isStale(u, now)) out.push(t(L, 'limits_stale'))
+  if (u.codex && (u.codex.five_hour || u.codex.week)) {
+    out.push('', t(L, 'limits_codex_title'), line('limits_five_hour', u.codex.five_hour, false), line('limits_week', u.codex.week, true))
+    if (u.codex.as_of) out.push(t(L, 'limits_as_of', { at: asOf(cfg, u.codex.as_of, now) }))
+  }
   return out.join('\n')
 }
 

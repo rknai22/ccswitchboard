@@ -15,10 +15,11 @@ import { safeTz } from './pin.ts'
 import { requestRestart } from './sessions.ts'
 import { t } from './strings.ts'
 import { tasksText } from './tasks.ts'
+import { panelUrl } from './panel.ts'
 
-export type Command = 'status' | 'tasks' | 'restart' | 'help'
+export type Command = 'status' | 'tasks' | 'restart' | 'panel' | 'help'
 
-const CMD_RE = /^\/(status|tasks|restart|help)(?:@\w+)?\s*$/
+const CMD_RE = /^\/(status|tasks|restart|panel|help)(?:@\w+)?\s*$/
 
 export function commandOf(text: string): Command | null {
   const m = CMD_RE.exec(text.trim())
@@ -58,6 +59,15 @@ async function run(cmd: Command, topic: string, ctx: BrokerContext): Promise<voi
       return say(statusText(ctx, topic))
     case 'help':
       return say(t(L, 'help'))
+    case 'panel': {
+      const url = panelUrl(ctx)
+      if (!url) return say(t(L, 'panel_off'))
+      const bot = ctx.store.get('bot_username')
+      return ctx.tg.send(topic, t(L, 'panel_link'), {
+        silent: true,
+        ...(bot ? { reply_markup: { inline_keyboard: [[{ text: t(L, 'panel_button'), url: `https://t.me/${bot}` }]] } } : {}),
+      }).then(() => {})
+    }
     case 'tasks':
       return say(tasksText(ctx, topic === 'general' ? null : topic))
     case 'restart': {
@@ -88,7 +98,7 @@ export const commandsModule: BrokerModule = {
     const owner = ctx.owner()
     if (!owner) return
     const L = ctx.config.lang
-    const commands = (['status', 'tasks', 'restart', 'help'] as const).map(c => ({ command: c, description: t(L, `cmd_${c}`) }))
+    const commands = (['status', 'tasks', 'restart', 'panel', 'help'] as const).map(c => ({ command: c, description: t(L, `cmd_${c}`) }))
     await ctx.tg.call(api => api.setMyCommands(commands, { scope: { type: 'chat', chat_id: owner.chat_id } }))
       .then(() => ctx.log('commands_set', { n: commands.length }))
       .catch(e => ctx.log('commands_set_failed', { err: e instanceof Error ? e.message : String(e) }))

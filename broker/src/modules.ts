@@ -10,8 +10,9 @@ import { digestModule } from './digest.ts'
 import { pinModule } from './pin.ts'
 import { sessionsModule } from './sessions.ts'
 import { tasksModule } from './tasks.ts'
+import { panelModule } from './panel.ts'
 import { topicsModule } from './topics.ts'
 
 // topics first: it handles the forum service messages before anyone else.
-export const modules: BrokerModule[] = [topicsModule, sessionsModule, tasksModule, commandsModule, pinModule, digestModule]
+export const modules: BrokerModule[] = [topicsModule, sessionsModule, tasksModule, commandsModule, panelModule, pinModule, digestModule]
 // === GRACE END_BLOCK: broker_modules ==========================================

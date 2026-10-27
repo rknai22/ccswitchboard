@@ -19,6 +19,7 @@
 //        sends a non-silent reply, loses its shim, or typingMaxMs passes —
 //        silent replies are progress and keep it.
 
+import { createHmac, timingSafeEqual } from 'crypto'
 import type { Update, Message } from 'grammy/types'
 import { MAX_TEXT_CHUNK, type Attachment, type Format, type ToolName } from '../../plugin/protocol.ts'
 import { ensureStateDir, readSecret, writeSecret, deleteSecret, type Config, type Secret } from './config.ts'
@@ -116,6 +117,7 @@ export class Broker {
       isLocked: () => this.isLocked(),
       owner: () => (this.isLocked() ? { owner_id: this.sec!.owner_id!, chat_id: this.sec!.chat_id! } : null),
       isBusy: topic => this.isTyping(topic),
+      verifyWebApp: initData => (this.sec ? verifyInitData(initData, this.sec.bot_token) : null),
       pending: topic => this.store.undelivered(topic).length,
       unbind: (topic, reason) => this.server.unbind(topic, reason),
       isConnected: topic => this.server.connectedSince(topic) !== null,
@@ -493,6 +495,33 @@ export class Broker {
       if (h) return h(a, conn, this.ctxFor(m))
     }
     throw new Error(`${tool}: not implemented yet`)
+  }
+}
+
+/** Telegram's Mini App signature check: secret = HMAC_SHA256("WebAppData",
+ *  token); hash = HMAC_SHA256(secret, sorted "k=v" lines without hash).
+ *  Returns the user id, or null when the data is forged or older than maxAgeS. */
+export function verifyInitData(initData: string, token: string, maxAgeS = 24 * 3600, now = Date.now()): number | null {
+  let p: URLSearchParams
+  try {
+    p = new URLSearchParams(initData)
+  } catch {
+    return null
+  }
+  const hash = p.get('hash')
+  if (!hash || !/^[0-9a-f]{64}$/.test(hash)) return null
+  const lines = [...p.entries()].filter(([k]) => k !== 'hash').map(([k, v]) => `${k}=${v}`).sort()
+  const secret = createHmac('sha256', 'WebAppData').update(token).digest()
+  const want = createHmac('sha256', secret).update(lines.join('\n')).digest()
+  const got = Buffer.from(hash, 'hex')
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null
+  const at = Number(p.get('auth_date'))
+  if (!Number.isFinite(at) || now / 1000 - at > maxAgeS) return null
+  try {
+    const id = JSON.parse(p.get('user') ?? '{}').id
+    return typeof id === 'number' ? id : null
+  } catch {
+    return null
   }
 }
 

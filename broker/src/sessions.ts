@@ -694,6 +694,24 @@ export function requestRestart(name: string): Promise<'asked' | 'launched' | 'un
   })
 }
 
+/** The panel's Stop: Esc into the topic's only Claude terminal (interrupts
+ *  the current turn, as Esc at the keyboard). */
+export function sendEscape(name: string): Promise<boolean> {
+  return serial(name, async () => {
+    const c = ctx()
+    const row = c.store.topic(name)
+    if (!row?.cwd || row.state !== 'open') return false
+    const cen = await census(name, row.cwd)
+    const term = cen.ours.length === 1 ? cen.ours[0]!.handle
+      : !cen.ours.length && cen.othersHandles.length === 1 ? cen.othersHandles[0]
+      : undefined
+    if (!term) return false
+    const r = await orca(['terminal', 'send', '--terminal', term, '--text', '\x1b'], 'orca_terminal_send')
+    c.log('escape_sent', { topic: name, ok: r.code === 0 })
+    return r.code === 0
+  })
+}
+
 /** The owner pressed Restart: close exactly the terminal named in the button
  *  (if it is still there) and relaunch with --resume. */
 export async function onRestartCallback(cq: NonNullable<Update['callback_query']>): Promise<void> {

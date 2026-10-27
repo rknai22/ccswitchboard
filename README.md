@@ -133,6 +133,18 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     press closes the terminal and relaunches it with `--resume`.
   - Terminals open in the topic's own Orca project (`id:<repo-id>::<path>`),
     so a folder that is a git worktree of another repo is not filed under it.
+- **Panel (Telegram Mini App).** With `panel_listen` set the broker serves a
+  small page: topics, connected/busy, waiting messages, open tasks with the age
+  of their last report, Claude and ChatGPT (Codex) limits, Restart and Stop.
+  - Telegram opens it from the menu button in the owner's private chat with
+    the bot (set automatically); `/panel` anywhere points there.
+  - Every data call carries Telegram's signed `initData`; the broker checks the
+    signature with the bot token and serves only the owner.
+  - Telegram needs https: `panel_tunnel: "cloudflared"` runs a quick tunnel and
+    re-points the menu button whenever its URL changes; or put your own URL
+    in `panel_url`.
+  - Restart posts the owner-only Restart button; Stop sends Esc to the
+    topic's only terminal.
 - **Modules on top of the core:**
   - `pin` — one pinned «Claude limits» message in General, updated every
     5 minutes from the usage poller's file;
@@ -207,6 +219,10 @@ setup wizard.
 | `projects_root` | `~/projects` | topic folders live directly in it (on the session machine) |
 | `claude_cmd` | `claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions` | how a topic session is started; the broker prepends `CCSB_KEY=<key>` and appends `--resume <id>` |
 | `usage_file` | `~/.local/state/ccswitchboard/usage.json` | the usage poller's output on the session machine |
+| `panel_listen` | `""` | host:port of the owner's panel (Telegram Mini App), e.g. `127.0.0.1:2280`; empty = no panel |
+| `panel_tunnel` | `""` | `cloudflared` = run a Cloudflare quick tunnel to the panel and follow its changing URL (no account needed) |
+| `panel_url` | `""` | the panel's public https URL when you serve it yourself (reverse proxy, Tailscale Funnel) |
+| `cloudflared` | `cloudflared` | path of the cloudflared binary |
 | `heal` | `false` | heal a live Claude whose plugin died (see Heal above); turn it on only where no other healer types into the terminals |
 | `timezone` | `Europe/Moscow` | for times in the pin and the digest |
 | `digest_at` | `10:00` | daily digest time in `timezone` |

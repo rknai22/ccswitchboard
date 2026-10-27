@@ -74,6 +74,9 @@ export type BrokerContext = {
   isBusy(topic: string): boolean
   /** Number of the topic's events not yet acked by a shim. */
   pending(topic: string): number
+  /** Telegram Mini App initData → the opener's user id when the signature
+   *  (made with the bot token, which modules never see) is valid and fresh. */
+  verifyWebApp(initData: string): number | null
 }
 
 export type BrokerModule = {
