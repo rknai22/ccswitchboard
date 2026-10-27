@@ -56,6 +56,8 @@ export type ServerDeps = {
   handle(tool: ToolName, args: unknown, conn: ConnInfo): Promise<unknown>
   /** A hello was refused because the topic's shim answered ping. */
   onTakeoverRefused?(topic: string): void
+  /** First ack of an event: the shim handed it to Claude. */
+  onAck?(topic: string, updateId: number): void
 }
 
 class Conn {
@@ -295,6 +297,7 @@ export class BrokerServer {
       if (c.info.mode !== 'topic' || !c.bound || typeof msg.update_id !== 'number') return
       const ok = this.deps.store.markDelivered(c.info.topic!, msg.update_id, c.instance)
       log('server', 'ack', { conn: c.info.id, topic: c.info.topic!, update_id: msg.update_id, fresh: ok })
+      if (ok) this.deps.onAck?.(c.info.topic!, msg.update_id)
       return
     }
     if (msg?.t === 'call') {

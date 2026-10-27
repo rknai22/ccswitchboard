@@ -13,6 +13,8 @@
 //   INV: General vs topic is decided by is_topic_message, not by the presence
 //        of message_thread_id — Telegram also sets the latter on plain replies
 //        in General.
+//   INV: 👀 on an owner message means its topic's shim acked it (handed it to
+//        Claude), not that the broker received it: no 👀 = not delivered.
 
 import type { Update, Message } from 'grammy/types'
 import type { Attachment, ToolName } from '../../plugin/protocol.ts'
@@ -33,6 +35,18 @@ const CLOSED_HINT_EVERY_MS = 15 * 60_000
 // <channel> tag — delimiter chars would let them break out (as upstream).
 export function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
+}
+
+/** Where to put 👀 for an acked event: the owner's message in the group or in
+ *  the private chat (negated id, see store). Local events (forwards, wake-ups:
+ *  negative update_id) were not written by the owner — no reaction. */
+export function reactionTarget(
+  updateId: number,
+  messageId: number,
+  owner: { owner_id?: number; chat_id?: number },
+): { chat: number; id: number } | null {
+  if (updateId < 0 || !owner.owner_id || !owner.chat_id) return null
+  return messageId < 0 ? { chat: owner.owner_id, id: -messageId } : { chat: owner.chat_id, id: messageId }
 }
 
 export class Broker {
@@ -59,6 +73,7 @@ export class Broker {
       isLocked: () => this.isLocked(),
       handle: (tool, args, conn) => this.handleTool(tool, args, conn),
       onTakeoverRefused: topic => this.onTakeoverRefused(topic),
+      onAck: (topic, updateId) => this.onAck(topic, updateId),
     })
     this.setup = new Setup({
       cfg,
@@ -191,7 +206,7 @@ export class Broker {
         log('core', 'event', { update_id: u.update_id, topic: r.ev.topic, message_id: r.ev.message_id, len: r.ev.text.length, fresh })
         if (fresh) {
           this.server.push(r.ev)
-          this.ackFeedback(u.message, r.threadId)
+          this.typing(u.message, r.threadId)
         }
         return
       }
@@ -269,12 +284,19 @@ export class Broker {
     return { ev, threadId }
   }
 
-  /** 👀 and "typing…" as the official plugin does — fire and forget. */
-  private ackFeedback(m: Message, threadId: number | null): void {
-    const chat = m.chat.id
-    void this.tg.enqueue(chat, false, api =>
-      api.setMessageReaction(chat, m.message_id, [{ type: 'emoji', emoji: ACK_REACTION }]),
+  /** 👀 once the topic's shim acked the owner's message — fire and forget. */
+  private onAck(topic: string, updateId: number): void {
+    const ev = this.store.event(topic, updateId)
+    const to = ev && this.isLocked() ? reactionTarget(updateId, ev.message_id, this.sec!) : null
+    if (!to) return
+    void this.tg.enqueue(to.chat, false, api =>
+      api.setMessageReaction(to.chat, to.id, [{ type: 'emoji', emoji: ACK_REACTION }]),
     ).catch(e => log('core', 'ack_reaction_failed', { err: describeError(e) }))
+  }
+
+  /** "typing…" as soon as the owner's message arrives — fire and forget. */
+  private typing(m: Message, threadId: number | null): void {
+    const chat = m.chat.id
     void this.tg.enqueue(chat, false, api =>
       api.sendChatAction(chat, 'typing', threadId !== null ? { message_thread_id: threadId } : {}),
     ).catch(() => {})
