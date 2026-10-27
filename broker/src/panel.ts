@@ -10,6 +10,7 @@
 //   INV: every /api call needs initData signed with the bot token (checked
 //        by the core: verifyWebApp) and opened by the owner; anything else
 //        gets 401 and no data. The page itself holds no data.
+//   INV: the page is dark only — it ignores Telegram's theme (owner's choice).
 //   INV: actions go through the same paths as Telegram: /api/restart posts
 //        the owner-only Restart button (requestRestart), never closes a
 //        terminal by itself; /api/stop sends Esc to the topic's only terminal.
@@ -182,21 +183,22 @@ const PAGE = String.raw`<!doctype html>
 <title>ccswitchboard</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{--bg:var(--tg-theme-bg-color,#fff);--fg:var(--tg-theme-text-color,#111);--hint:var(--tg-theme-hint-color,#888);
---card:var(--tg-theme-secondary-bg-color,#f2f2f5);--btn:var(--tg-theme-button-color,#2a7);--btnfg:var(--tg-theme-button-text-color,#fff)}
+:root{--bg:#0f1115;--fg:#e8eaed;--hint:#8b919a;--card:#1a1d23;--line:#2a2e36;--btn:#3b82f6;--btnfg:#fff;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,system-ui,sans-serif}
 h1{font-size:18px;margin:0 0 12px}.card{background:var(--card);border-radius:12px;padding:12px;margin-bottom:12px}
 .row{display:flex;align-items:center;gap:8px}.grow{flex:1;min-width:0}.hint{color:var(--hint);font-size:13px}
-.dot{width:10px;height:10px;border-radius:50%;flex:none}.up{background:#2c3}.down{background:#d33}
-.bar{height:8px;border-radius:4px;background:rgba(127,127,127,.25);overflow:hidden;margin:4px 0 8px}.bar>i{display:block;height:100%}
-.task{padding:6px 0;border-top:1px solid rgba(127,127,127,.15)}.task:first-child{border-top:0}
-.old{color:#d70}button{border:0;border-radius:8px;padding:6px 10px;background:var(--btn);color:var(--btnfg);font-size:13px}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}.up{background:#22c55e}.down{background:#ef4444}
+.bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:4px 0 8px}.bar>i{display:block;height:100%}
+.task{padding:6px 0;border-top:1px solid var(--line)}.task:first-child{border-top:0}
+.old{color:#f59e0b}button{border:0;border-radius:8px;padding:6px 10px;background:var(--btn);color:var(--btnfg);font-size:13px}
 button.ghost{background:transparent;color:var(--btn);border:1px solid var(--btn)}.title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#err{color:#d33}
+#err{color:#ef4444}
 </style></head><body>
 <h1 id="h">ccswitchboard</h1><div id="err"></div><div id="limits"></div><div id="topics"></div>
 <script>
 const tg = window.Telegram && Telegram.WebApp; tg && tg.ready(); tg && tg.expand()
+// Dark only, whatever the Telegram theme (the owner's choice).
+try { tg && tg.setHeaderColor('#0f1115'); tg && tg.setBackgroundColor('#0f1115'); tg && tg.setBottomBarColor && tg.setBottomBarColor('#0f1115') } catch (e) {}
 const T = {
   ru:{codex:'Лимиты ChatGPT',limits:'Лимиты Claude',five:'5 часов',week:'Неделя',asof:'на',up:'на связи',down:'не на связи',busy:'работает',idle:'свободна',
       pending:'ждут доставки',noTasks:'задач нет',min:'мин назад',restart:'Перезапустить',stop:'Стоп',sent:'Готово',
