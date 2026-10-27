@@ -66,6 +66,7 @@ const STRINGS = {
   // ---- pinned limits message and the morning digest (pin.ts, digest.ts) ----
   limits_title: { en: 'Claude limits', ru: 'Лимиты Claude' },
   limits_codex_title: { en: 'ChatGPT (Codex) limits', ru: 'Лимиты ChatGPT (Codex)' },
+  voice_failed: { en: '🎤 (voice message — could not transcribe: {why}; download it to listen)', ru: '🎤 (голосовое — не удалось расшифровать: {why}; скачай, чтобы послушать)' },
   panel_button: { en: '📊 Panel', ru: '📊 Панель' },
   panel_link: { en: 'The panel opens from the menu button in your private chat with the bot.', ru: 'Панель открывается кнопкой меню в личке с ботом.' },
   panel_off: { en: 'The panel is not set up (panel_listen in the broker config).', ru: 'Панель не настроена (panel_listen в конфиге broker).' },

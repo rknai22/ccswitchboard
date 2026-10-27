@@ -37,6 +37,11 @@ export type Config = {
    *  its (changing) URL; '' = none */
   panel_tunnel: string
   cloudflared: string
+  /** file holding the OpenAI API key for voice transcription (default
+   *  <state_dir>/openai.key); no file = no transcription */
+  openai_key_file: string
+  openai_model: string
+  openai_api: string
   timezone: string
   digest_at: string
 }
@@ -62,6 +67,9 @@ const DEFAULTS: Config = {
   panel_url: '',
   panel_tunnel: '',
   cloudflared: 'cloudflared',
+  openai_key_file: '',
+  openai_model: 'whisper-1',
+  openai_api: 'https://api.openai.com',
   timezone: 'Europe/Moscow',
   digest_at: '10:00',
 }
@@ -80,6 +88,8 @@ export function loadConfig(path: string): Config {
   // state_dir is the broker's own machine path; projects_root belongs to the
   // session machine, so it is left for wave B to expand there.
   cfg.state_dir = resolve(expandHome(cfg.state_dir))
+  // The key file lives with the broker's other secrets unless set elsewhere.
+  cfg.openai_key_file = cfg.openai_key_file ? resolve(expandHome(cfg.openai_key_file)) : join(cfg.state_dir, 'openai.key')
   cfg.api_root = cfg.api_root.replace(/\/+$/, '')
   return cfg
 }

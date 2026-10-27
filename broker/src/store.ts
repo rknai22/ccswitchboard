@@ -192,6 +192,13 @@ export class Store {
     ).all(topic, instance, since).map(r => JSON.parse(r.payload) as StoredEvent)
   }
 
+  /** Replace an event's payload before it was delivered (e.g. a transcript
+   *  added to a voice message). Returns false once it was delivered. */
+  updateUndelivered(ev: StoredEvent): boolean {
+    return this.db.query('UPDATE updates SET payload = ? WHERE update_id = ? AND topic = ? AND delivered = 0')
+      .run(JSON.stringify(ev), ev.update_id, ev.topic).changes > 0
+  }
+
   /** One stored event of a topic by its update_id. */
   event(topic: string, updateId: number): StoredEvent | undefined {
     const r = this.db.query<{ payload: string }, [number, string]>('SELECT payload FROM updates WHERE update_id = ? AND topic = ?')

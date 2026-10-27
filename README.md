@@ -133,6 +133,10 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     press closes the terminal and relaunches it with `--resume`.
   - Terminals open in the topic's own Orca project (`id:<repo-id>::<path>`),
     so a folder that is a git worktree of another repo is not filed under it.
+- **Voice messages.** With an OpenAI key in `openai_key_file` the broker
+  transcribes the owner's voice messages, audio and video notes (Whisper)
+  before the session gets them: the text arrives as «🎤 …», the audio stays
+  attached. Without the key nothing changes.
 - **Panel (Telegram Mini App).** With `panel_listen` set the broker serves a
   small page: topics, connected/busy, waiting messages, open tasks with the age
   of their last report, Claude and ChatGPT (Codex) limits, Restart and Stop.
@@ -223,6 +227,8 @@ setup wizard.
 | `panel_tunnel` | `""` | `cloudflared` = run a Cloudflare quick tunnel to the panel and follow its changing URL (no account needed) |
 | `panel_url` | `""` | the panel's public https URL when you serve it yourself (reverse proxy, Tailscale Funnel) |
 | `cloudflared` | `cloudflared` | path of the cloudflared binary |
+| `openai_key_file` | `<state_dir>/openai.key` | OpenAI API key (one line, `sk-…`, mode 600) for transcribing the owner's voice messages; no file = no transcription |
+| `openai_model` | `whisper-1` | transcription model |
 | `heal` | `false` | heal a live Claude whose plugin died (see Heal above); turn it on only where no other healer types into the terminals |
 | `timezone` | `Europe/Moscow` | for times in the pin and the digest |
 | `digest_at` | `10:00` | daily digest time in `timezone` |

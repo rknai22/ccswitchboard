@@ -15,6 +15,13 @@
 //        in General.
 //   INV: 👀 on an owner message means its topic's shim acked it (handed it to
 //        Claude), not that the broker received it: no 👀 = not delivered.
+//   INV: an owner voice message (voice, audio, video note) is transcribed
+//        (voice.ts) before its session gets it, when the OpenAI key file is
+//        there: the event text becomes "🎤 <transcript>"; the attachment
+//        stays, so the session can still fetch the audio. On failure the
+//        event goes with the reason in its text. Transcription runs off the
+//        poll loop; the event is stored first, so a crash meanwhile loses
+//        nothing (the backlog then carries it untranscribed).
 //   INV: after an ack "typing…" is kept up in that chat until the session
 //        sends a non-silent reply, loses its shim, or typingMaxMs passes —
 //        silent replies are progress and keep it.
@@ -31,6 +38,7 @@ import { Store, type StoredEvent } from './store.ts'
 import { t } from './strings.ts'
 import { Telegram, describeError, isParseError, type AllowedUpdate } from './telegram.ts'
 import { mdToHtml } from './markdown.ts'
+import { VOICE_KINDS, openaiKey, transcribe } from './voice.ts'
 import { commandOf } from './commands.ts'
 
 const ACK_REACTION = '👀'
@@ -219,7 +227,8 @@ export class Broker {
         const fresh = this.store.ingest(botId, r.ev)
         log('core', 'event', { update_id: u.update_id, topic: r.ev.topic, message_id: r.ev.message_id, len: r.ev.text.length, fresh })
         if (fresh) {
-          this.server.push(r.ev)
+          if (r.ev.attachment && VOICE_KINDS.includes(r.ev.attachment.kind) && openaiKey(this.cfg)) void this.transcribeThenPush(r.ev)
+          else this.server.push(r.ev)
           this.typing(u.message, r.threadId)
         }
         return
@@ -300,6 +309,25 @@ export class Broker {
       ev.reply_to = { message_id: id(rt.message_id), ...(quoted ? { text: quoted } : {}) }
     }
     return { ev, threadId }
+  }
+
+  /** Voice → text, then hand the event to the session. */
+  private async transcribeThenPush(ev: StoredEvent): Promise<void> {
+    const L = this.cfg.lang
+    const att = ev.attachment!
+    let out: StoredEvent
+    try {
+      const file = await this.tg.download(att.file_id)
+      const tr = await transcribe(this.cfg, file, att.mime)
+      log('core', 'voice_transcribed', { update_id: ev.update_id, ok: tr.ok, ...(tr.ok ? { len: tr.text.length } : { err: tr.error }) })
+      const note = tr.ok ? `🎤 ${tr.text}` : t(L, 'voice_failed', { why: tr.error })
+      out = { ...ev, text: ev.text && !/^\((voice|audio|video note)/.test(ev.text) ? `${note}\n\n${ev.text}` : note }
+    } catch (e) {
+      log('core', 'voice_failed', { update_id: ev.update_id, err: describeError(e) })
+      out = { ...ev, text: `${t(L, 'voice_failed', { why: 'download' })}\n\n${ev.text}` }
+    }
+    // Delivered meanwhile (a backlog after a reconnect): leave it as it went.
+    if (this.store.updateUndelivered(out)) this.server.push(out)
   }
 
   /** 👀 once the topic's shim acked the owner's message — fire and forget. */
