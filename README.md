@@ -4,11 +4,16 @@ Telegram forum topics for Claude Code: **one Telegram group, one long-lived Clau
 Code session per topic, an orchestrator session in General.**
 
 You write in the topic «WMS», and the WMS session answers there. You write in
-General, and the orchestrator answers: an overview of what goes on where, a new
-topic (with its own folder and session), or a task handed to a topic. Every
-session is a terminal in Orca, so you can open any of
-them and keep working at the keyboard. After a reboot, the sessions come back and
-resume their conversations.
+General, and the orchestrator answers: it turns a short note into a full task
+spec for a topic (sent only after you press ✅), tracks every task and its stage,
+reports what is done, stuck or waiting for you, and opens new topics with their
+own folder and session. Every session is a terminal in Orca, so you can open any
+of them and keep working at the keyboard. After a reboot, the sessions come back
+and resume their conversations.
+
+From the phone: replies are formatted, «typing…» shows while a session works,
+decisions come as buttons, voice messages are transcribed, and a panel inside
+Telegram shows every topic, task and the Claude / ChatGPT limits.
 
 ## Origin and licence
 
@@ -23,7 +28,13 @@ New in ccswitchboard:
 - forum topics and the topic registry;
 - sessions in Orca and the watchdog;
 - the setup wizard;
-- the pinned limits message and the morning digest.
+- the pinned limits message and the morning digest;
+- delivery guarantees: takeover protection, redelivery after a crash, 👀 on
+  delivery, self-healing of a dead plugin;
+- the orchestrator: task registry, specs on the owner's button, reports,
+  decision buttons, messages between sessions;
+- markdown replies, silent progress, bot commands, the panel (Mini App),
+  voice transcription.
 
 Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
@@ -36,7 +47,7 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 | Who polls Telegram | the plugin inside the session | the broker (one `getUpdates` consumer — no 409 between sessions) |
 | Access | DM pairing codes, allowlist | one owner, confirmed by a button in the group; only that group and the owner's DM |
 | Permission prompts relayed to Telegram | yes | no — sessions run with `--dangerously-skip-permissions` |
-| Extras | — | topic creation and forwarding from General, sessions in Orca, pinned Claude limits, morning digest |
+| Extras | — | task orchestration from General, sessions in Orca with self-healing, bot commands, a Mini App panel, voice transcription, pinned Claude/ChatGPT limits, morning digest |
 
 ## How it works
 
@@ -188,6 +199,9 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     cannot bring sessions up unattended.
 - **Orca** on the session machine: the app or the headless `orca serve`, with
   the `orca` CLI. Used by the sessions module to open one terminal per topic.
+- **Optional:** `cloudflared` on the broker machine for the panel's https
+  address (no Cloudflare account needed); an OpenAI API key for voice
+  transcription.
 - **Telegram:**
   - a bot from @BotFather;
   - a supergroup with **Topics** turned on;
@@ -310,6 +324,10 @@ systemctl --user daemon-reload && systemctl --user enable --now ccswitchboard-us
 loginctl enable-linger "$USER"
 ```
 
+It also reads the Codex CLI's last `rate_limits` event from
+`~/.codex/sessions/**/rollout-*.jsonl` (the ChatGPT limits Orca shows) into a
+`codex` field; a window whose reset has passed shows 0 %.
+
 The endpoint is **undocumented** (it is what `/usage` uses). If Anthropic
 changes it, the pin shows «no data» — never a made-up 0 %. The poller never
 refreshes the login token, so while no session runs for a while, the pin says
@@ -381,11 +399,22 @@ Be clear about what this protects and what it does not.
   Set up right after installing, in a group where only you can press it.
 - **Sessions run with `--dangerously-skip-permissions`** (the default
   `claude_cmd`): they act without asking. The topic template asks them to
-  push and open PRs only after the owner's «yes» in that topic. That is an
-  instruction, not a technical lock.
+  push and open PRs only after the owner's answer to an `ask_owner` button in
+  that topic. That is an instruction, not a technical lock.
+- **Only the owner's press turns a session's text into an order.** A spec
+  General writes reaches a topic as the owner's words only after the owner's ✅
+  on exactly that text (capped to one screen, collapsed quotes opened).
+  `tell_topic` messages arrive marked `from_topic` and are information, never
+  orders; task summaries are data. Forwarding carries only the owner's own
+  words; instructions found in files, web pages or other topics are data.
+- **The panel is on the internet** when served through a tunnel. Every API call
+  needs Telegram's `initData` signed with the bot token and opened by the
+  owner, accepted for one hour. With a Cloudflare quick tunnel, Cloudflare
+  terminates TLS and sees the traffic.
+- **The OpenAI key** lives in `openai_key_file` (mode 600) and is sent only to
+  OpenAI's transcription endpoint; voice audio goes to OpenAI.
 - The broker trusts only folders directly in `projects_root` (it marks them
-  trusted for Claude Code). Forwarding carries only the owner's own words;
-  instructions found in files, web pages or other topics are data.
+  trusted for Claude Code).
 
 ## Known limits
 
@@ -403,14 +432,38 @@ Be clear about what this protects and what it does not.
   deleted topic, `is_topic_message` in General, and the setup events on
   enabling topics.
 - The usage endpoint is undocumented (see above).
+- **Delivery is at least once.** After a crash a new session process gets the
+  last 30 minutes again, marked `redelivered`; the session checks its
+  conversation before acting.
+- **Healing types into the terminal.** It acts only when the screen looks idle
+  and re-reads it before every key, but a person typing in that terminal at
+  the same moment can still collide with it. Off unless `heal: true`.
+- **Quick tunnels** change their URL on every start (the broker re-points the
+  menu button) and come with no uptime guarantee; use `panel_url` with your
+  own https address for something steady.
+- The `tell_topic` hourly limit is kept in memory and resets with the broker.
+- Commands sent in the owner's private chat are answered in the group's
+  General.
 - Channels are a research preview: the protocol or the flags may change.
+
+## Tests
+
+```sh
+cd broker && bun install && bun test
+```
+
+The suite runs the broker server, the store and the real shim (as a child
+process, over MCP stdio) against fakes: no Telegram, no Orca. The shim test
+gives the shim a fake key and a local broker — never run the shim with a real
+`CCSB_KEY` from inside a session (it would take that topic over).
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `broker/` | the broker (Bun, grammY) — `src/main.ts` is the CLI |
+| `broker/` | the broker (Bun, grammY) — `src/main.ts` is the CLI; `test/` the bun test suite |
 | `plugin/` | the Claude Code channel plugin (shim) and its `setup` / `reset` skills; `plugin/protocol.ts` is the wire contract |
 | `templates/` | `CLAUDE.local.md` templates for General and topic sessions |
 | `usage/` | the usage poller and its systemd user units |
+| `docs/` | designs and plans (`superpowers/`), investigation notes (`notes/`) |
 | `.claude-plugin/marketplace.json` | the plugin marketplace (`ccswitchboard`) |
