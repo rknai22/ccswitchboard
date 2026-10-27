@@ -209,12 +209,12 @@ const T = {
 }
 let L = T.ru
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-const hhmm = ms => new Date(ms).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+const hhmm = (ms, day) => new Date(ms).toLocaleString(L === T.en ? 'en-GB' : 'ru-RU', Object.assign({hour:'2-digit', minute:'2-digit', hour12:false}, day ? {weekday:'short'} : {}))
 const api = (path, body) => fetch(path, {method: body ? 'POST' : 'GET', headers: {'x-telegram-init-data': tg ? tg.initData : '', 'content-type':'application/json'}, body: body ? JSON.stringify(body) : undefined})
-function bar(w, name) {
+function bar(w, name, day) {
   if (!w) return ''
   const c = w.pct >= 90 ? '#d33' : w.pct >= 70 ? '#e90' : '#2c3'
-  const reset = w.resets_at ? ' · ' + hhmm(Date.parse(w.resets_at)) : ''
+  const reset = w.resets_at ? ' · ' + hhmm(Date.parse(w.resets_at), day) : ''
   return '<div class="row"><span class="grow">' + name + '</span><b>' + Math.round(w.pct) + '%</b><span class="hint">' + reset + '</span></div><div class="bar"><i style="width:' + Math.min(100, w.pct) + '%;background:' + c + '"></i></div>'
 }
 async function act(path, topic, question) {
@@ -228,13 +228,13 @@ async function load() {
     const s = await r.json()
     L = T[s.lang] || T.ru
     document.getElementById('err').textContent = ''
-    const card = (title, l) => l ? '<div class="card"><b>' + title + '</b>' + bar(l.five_hour, L.five) + bar(l.week, L.week) + (l.as_of ? '<div class="hint">' + L.asof + ' ' + hhmm(Date.parse(l.as_of)) + '</div>' : '') + '</div>' : ''
+    const card = (title, l) => l ? '<div class="card"><b>' + title + '</b>' + bar(l.five_hour, L.five) + bar(l.week, L.week, true) + (l.as_of ? '<div class="hint">' + L.asof + ' ' + hhmm(Date.parse(l.as_of)) + '</div>' : '') + '</div>' : ''
     document.getElementById('limits').innerHTML = card(L.limits, s.limits) + card(L.codex, s.codex)
     document.getElementById('topics').innerHTML = s.topics.map(tp => {
       const up = tp.connected_since !== null
       const tasks = tp.tasks.length ? tp.tasks.map(x => '<div class="task"><div class="title">' + (L.states[x.state] || '') + ' #' + x.id + ' ' + esc(x.title) + '</div><div class="hint ' + (x.report_age_min > 120 && x.state !== 'done' ? 'old' : '') + '">' + esc(x.summary || '') + ' · ' + x.report_age_min + ' ' + L.min + '</div></div>').join('') : '<div class="hint">' + L.noTasks + '</div>'
       return '<div class="card"><div class="row"><span class="dot ' + (up ? 'up' : 'down') + '"></span><span class="grow title">' + esc(tp.title) + '</span>' +
-        '<button class="ghost" data-a="stop" data-t="' + esc(tp.name) + '">' + L.stop + '</button> <button data-a="restart" data-t="' + esc(tp.name) + '">' + L.restart + '</button></div>' +
+        (up ? '<button class="ghost" data-a="stop" data-t="' + esc(tp.name) + '">' + L.stop + '</button> ' : '') + '<button data-a="restart" data-t="' + esc(tp.name) + '">' + L.restart + '</button></div>' +
         '<div class="hint">' + (up ? L.up + ' · ' + (tp.busy ? L.busy : L.idle) : L.down) + (tp.pending ? ' · ' + L.pending + ': ' + tp.pending : '') + '</div>' + tasks + '</div>'
     }).join('')
   } catch (e) { document.getElementById('err').textContent = String(e) }
