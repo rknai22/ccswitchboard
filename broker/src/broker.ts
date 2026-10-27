@@ -15,6 +15,9 @@
 //        in General.
 //   INV: 👀 on an owner message means its topic's shim acked it (handed it to
 //        Claude), not that the broker received it: no 👀 = not delivered.
+//   INV: after an ack "typing…" is kept up in that chat until the session
+//        sends a non-silent reply, loses its shim, or typingMaxMs passes —
+//        silent replies are progress and keep it.
 
 import type { Update, Message } from 'grammy/types'
 import { MAX_TEXT_CHUNK, type Attachment, type Format, type ToolName } from '../../plugin/protocol.ts'
@@ -31,6 +34,8 @@ import { mdToHtml } from './markdown.ts'
 const ACK_REACTION = '👀'
 const CONFLICT_NOTICE_EVERY_MS = 3600_000
 const CLOSED_HINT_EVERY_MS = 15 * 60_000
+
+export const typingTiming = { everyMs: 4500, maxMs: 30 * 60_000 }
 
 // Filenames and titles are uploader-controlled and end up inside the session's
 // <channel> tag — delimiter chars would let them break out (as upstream).
@@ -57,6 +62,8 @@ export class Broker {
   readonly setup: Setup
   private sec: Secret | null
   private timers: ReturnType<typeof setInterval>[] = []
+  /** topic → its "typing…" loop while the session works */
+  private typingLoops = new Map<string, { timer: ReturnType<typeof setInterval>; until: number }>()
   private base: BrokerContext
 
   constructor(readonly cfg: Config, private mods: BrokerModule[] = defaultModules) {
@@ -142,6 +149,7 @@ export class Broker {
   }
 
   stop(): void {
+    for (const topic of [...this.typingLoops.keys()]) this.stopTyping(topic)
     for (const tm of this.timers) clearInterval(tm)
     this.setup.stop()
     this.tg.stopPolling()
@@ -295,6 +303,35 @@ export class Broker {
     void this.tg.enqueue(to.chat, false, api =>
       api.setMessageReaction(to.chat, to.id, [{ type: 'emoji', emoji: ACK_REACTION }]),
     ).catch(e => log('core', 'ack_reaction_failed', { err: describeError(e) }))
+    const thread = to.id === ev!.message_id ? (this.store.topic(topic)?.thread_id ?? null) : null
+    this.startTyping(topic, to.chat, thread)
+  }
+
+  /** Keep "typing…" up in the topic while its session works on a message. */
+  startTyping(topic: string, chat: number, thread: number | null): void {
+    this.stopTyping(topic)
+    const send = () => {
+      const loop = this.typingLoops.get(topic)
+      if (!loop || Date.now() > loop.until || this.server.connectedSince(topic) === null) return this.stopTyping(topic)
+      void this.tg.enqueue(chat, false, api =>
+        api.sendChatAction(chat, 'typing', thread !== null ? { message_thread_id: thread } : {}),
+      ).catch(() => {})
+    }
+    const timer = setInterval(send, typingTiming.everyMs)
+    timer.unref?.()
+    this.typingLoops.set(topic, { timer, until: Date.now() + typingTiming.maxMs })
+    send()
+  }
+
+  stopTyping(topic: string): void {
+    const loop = this.typingLoops.get(topic)
+    if (!loop) return
+    clearInterval(loop.timer)
+    this.typingLoops.delete(topic)
+  }
+
+  isTyping(topic: string): boolean {
+    return this.typingLoops.has(topic)
   }
 
   /** "typing…" as soon as the owner's message arrives — fire and forget. */
@@ -402,6 +439,7 @@ export class Broker {
         for (const f of files) {
           if (typeof f?.name !== 'string' || typeof f.data_b64 !== 'string') throw new Error('reply: each file needs name and data_b64')
         }
+        if (a.silent !== true) this.stopTyping(topic)
         const message_ids = await this.sendTopic(topic, a.text, {
           format: formatOf(a.format),
           silent: a.silent === true,
