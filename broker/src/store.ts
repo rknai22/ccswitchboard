@@ -2,8 +2,10 @@
 // MODULE_CONTRACT:
 //   IN:  <state_dir>/state.db (bun:sqlite, WAL, file 0600).
 //   OUT: typed access to four tables:
-//        updates(update_id PK, seq, topic, payload, delivered, created_at)
-//          — durable per-topic event queue; seq is insertion order;
+//        updates(update_id PK, seq, topic, payload, delivered, created_at,
+//          instance, delivered_at) — durable per-topic event queue; seq is
+//          insertion order; instance/delivered_at: which shim process acked it
+//          and when (for redelivery to a restarted session);
 //        topics(name PK, chat_id, thread_id UNIQUE NULL, title, cwd,
 //          session_id, key UNIQUE, state open|closed) — "general" has
 //          thread_id NULL;
@@ -84,6 +86,10 @@ export class Store {
         value TEXT NOT NULL
       );
     `)
+    // Columns added after the first release: add them to an older database.
+    const cols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(updates)').all().map(r => r.name))
+    if (!cols.has('instance')) this.db.exec('ALTER TABLE updates ADD COLUMN instance TEXT')
+    if (!cols.has('delivered_at')) this.db.exec('ALTER TABLE updates ADD COLUMN delivered_at INTEGER')
   }
 
   close(): void {
@@ -164,10 +170,32 @@ export class Store {
     ).all(topic).map(r => JSON.parse(r.payload) as StoredEvent)
   }
 
-  /** Marks delivered only if the update belongs to this topic. */
-  markDelivered(topic: string, updateId: number): boolean {
-    return this.db.query('UPDATE updates SET delivered = 1 WHERE update_id = ? AND topic = ? AND delivered = 0')
-      .run(updateId, topic).changes > 0
+  /** Marks delivered only if the update belongs to this topic; records which
+   *  shim instance acked it. A repeated ack (a redelivery) moves it to the
+   *  new instance but does not count as fresh. */
+  markDelivered(topic: string, updateId: number, instance?: string): boolean {
+    const fresh = this.db.query(
+      'UPDATE updates SET delivered = 1, instance = ?, delivered_at = ? WHERE update_id = ? AND topic = ? AND delivered = 0',
+    ).run(instance ?? null, Date.now(), updateId, topic).changes > 0
+    if (!fresh && instance) {
+      this.db.query('UPDATE updates SET instance = ?, delivered_at = ? WHERE update_id = ? AND topic = ?')
+        .run(instance, Date.now(), updateId, topic)
+    }
+    return fresh
+  }
+
+  /** Events this topic's previous shim instance acked at or after `since`. */
+  redeliverable(topic: string, instance: string, since: number): StoredEvent[] {
+    return this.db.query<{ payload: string }, [string, string, number]>(
+      'SELECT payload FROM updates WHERE topic = ? AND delivered = 1 AND instance = ? AND delivered_at >= ? ORDER BY seq',
+    ).all(topic, instance, since).map(r => JSON.parse(r.payload) as StoredEvent)
+  }
+
+  /** One stored event of a topic by its update_id. */
+  event(topic: string, updateId: number): StoredEvent | undefined {
+    const r = this.db.query<{ payload: string }, [number, string]>('SELECT payload FROM updates WHERE update_id = ? AND topic = ?')
+      .get(updateId, topic)
+    return r ? (JSON.parse(r.payload) as StoredEvent) : undefined
   }
 
   /** An owner event in a topic by its message id (for modules, e.g. forward). */

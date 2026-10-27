@@ -13,6 +13,12 @@
 //        predecessor). Hellos of one topic are decided one at a time.
 //   INV: an event counts as delivered only on the shim's ack; on (re)connect
 //        every unacked event of the topic is sent again, in order.
+//   INV: a NEW shim instance (another process — the session restarted) that
+//        knows 'redelivery' also gets, marked redelivered, what the previous
+//        instance acked in the last redeliverWindowMs before it went away:
+//        an ack only says the shim handed it to Claude, and a Claude that
+//        crashed right then never kept it. A reconnect of the same instance
+//        or an old shim gets no redeliveries.
 //   INV: a call for a tool missing from the connection's welcome.tools is
 //        refused here, before any handler runs.
 
@@ -32,6 +38,7 @@ export const serverTiming = {
   /** How long a live shim has to answer ping; generous because a shim busy
    *  sending a big file answers late. */
   pingWaitMs: 10_000,
+  redeliverWindowMs: 30 * 60_000,
 }
 // Biggest legit line: a reply with several 50 MB files in base64.
 const MAX_LINE_CHARS = 400 * 1024 * 1024
@@ -74,6 +81,7 @@ export class BrokerServer {
   private byTopic = new Map<string, Conn>()
   private conns = new Set<Conn>()
   private helloChains = new Map<string, Promise<void>>()
+  private stopped = false
 
   constructor(private deps: ServerDeps) {}
 
@@ -90,6 +98,9 @@ export class BrokerServer {
   }
 
   close(): void {
+    // Sockets close after this returns; their handlers must not touch a store
+    // the caller is about to close.
+    this.stopped = true
     for (const c of this.conns) c.sock.destroy()
     this.server?.close()
   }
@@ -167,7 +178,10 @@ export class BrokerServer {
     sock.on('close', () => {
       clearTimeout(helloTimer)
       this.conns.delete(c)
-      if (c.info.topic && this.byTopic.get(c.info.topic) === c) this.byTopic.delete(c.info.topic)
+      if (c.info.topic && this.byTopic.get(c.info.topic) === c) {
+        this.byTopic.delete(c.info.topic)
+        if (c.instance && !this.stopped) this.deps.store.set(`topic:${c.info.topic}:instance_gone_at`, Date.now())
+      }
       log('server', 'conn_close', { conn: c.info.id, topic: c.info.topic ?? null })
     })
   }
@@ -207,13 +221,13 @@ export class BrokerServer {
 
   /** Give the topic to c unless a live connection holds it. */
   private async claim(c: Conn, name: string): Promise<void> {
-    if (c.sock.destroyed) return
+    if (c.sock.destroyed || this.stopped) return
     const topic = this.deps.store.topic(name)
     if (!topic || topic.state !== 'open') return this.reject(c, `topic ${name} is closed`)
     const old = this.byTopic.get(name)
     if (old && old !== c && old.bound && !old.sock.destroyed && old.caps.has('ping')) {
       const alive = await this.ping(old, serverTiming.pingWaitMs)
-      if (c.sock.destroyed) return
+      if (c.sock.destroyed || this.stopped) return
       if (alive && this.byTopic.get(name) === old && old.bound) {
         log('server', 'takeover_refused', { conn: c.info.id, holder: old.info.id, topic: name })
         this.deps.onTakeoverRefused?.(name)
@@ -222,6 +236,7 @@ export class BrokerServer {
     }
     const cur = this.byTopic.get(name)
     if (cur && cur !== c) {
+      if (cur.instance) this.deps.store.set(`topic:${name}:instance_gone_at`, Date.now())
       cur.bound = false
       cur.send({ t: 'unbound', reason: 'replaced by a newer connection for this topic' })
       cur.sock.end()
@@ -235,7 +250,21 @@ export class BrokerServer {
     c.send({ t: 'welcome', mode: 'topic', topic: name, tools: c.tools })
     const backlog = this.deps.store.undelivered(name)
     for (const ev of backlog) c.send({ t: 'event', ...ev })
-    log('server', 'welcome', { conn: c.info.id, mode: 'topic', topic: name, backlog: backlog.length, caps: [...c.caps].join(',') || null })
+    const st = this.deps.store
+    const prevInstance = st.get(`topic:${name}:instance`)
+    let again = 0
+    if (c.instance && prevInstance && prevInstance !== c.instance && c.caps.has('redelivery')) {
+      const goneAt = Number(st.get(`topic:${name}:instance_gone_at`) ?? 0) || Date.now()
+      for (const ev of st.redeliverable(name, prevInstance, goneAt - serverTiming.redeliverWindowMs)) {
+        c.send({ t: 'event', ...ev, redelivered: true })
+        again++
+      }
+    }
+    if (c.instance) {
+      st.set(`topic:${name}:instance`, c.instance)
+      st.del(`topic:${name}:instance_gone_at`)
+    }
+    log('server', 'welcome', { conn: c.info.id, mode: 'topic', topic: name, backlog: backlog.length, redelivered: again, caps: [...c.caps].join(',') || null })
   }
 
   /** true when c answers a fresh ping within ms; false on timeout or close. */
@@ -264,7 +293,7 @@ export class BrokerServer {
     }
     if (msg?.t === 'ack') {
       if (c.info.mode !== 'topic' || !c.bound || typeof msg.update_id !== 'number') return
-      const ok = this.deps.store.markDelivered(c.info.topic!, msg.update_id)
+      const ok = this.deps.store.markDelivered(c.info.topic!, msg.update_id, c.instance)
       log('server', 'ack', { conn: c.info.id, topic: c.info.topic!, update_id: msg.update_id, fresh: ok })
       return
     }
