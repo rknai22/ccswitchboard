@@ -172,14 +172,15 @@ export class Store {
 
   /** Marks delivered only if the update belongs to this topic; records which
    *  shim instance acked it. A repeated ack (a redelivery) moves it to the
-   *  new instance but does not count as fresh. */
+   *  new instance but keeps the first delivered_at — so the redelivery
+   *  window does not slide forward with every restart — and is not fresh. */
   markDelivered(topic: string, updateId: number, instance?: string): boolean {
     const fresh = this.db.query(
       'UPDATE updates SET delivered = 1, instance = ?, delivered_at = ? WHERE update_id = ? AND topic = ? AND delivered = 0',
     ).run(instance ?? null, Date.now(), updateId, topic).changes > 0
     if (!fresh && instance) {
-      this.db.query('UPDATE updates SET instance = ?, delivered_at = ? WHERE update_id = ? AND topic = ?')
-        .run(instance, Date.now(), updateId, topic)
+      this.db.query('UPDATE updates SET instance = ? WHERE update_id = ? AND topic = ?')
+        .run(instance, updateId, topic)
     }
     return fresh
   }

@@ -12,14 +12,16 @@
 //   INV: the helper prints JSON {ok, why} only — never screen text (the
 //        launch command on screen carries the topic key).
 //   INV: nothing here closes a terminal; after maxFails heals in a row the
-//        owner is asked (a button), at most once per askGapMs.
+//        owner is asked (a button) once — again only after the topic was
+//        connected in between (the watchdog then clears the state).
+//   INV: a shim process that is alive but has no link to the broker is a
+//        network problem, not a dead plugin: nothing is typed ("shim_alive").
 
 export const healTiming = {
   strikes: 2,
   minClaudeAgeS: 120,
   cooldownMs: 300_000,
   maxFails: 3,
-  askGapMs: 15 * 60_000,
   /** after the keystrokes, how long to wait for the shim to come back */
   connectWaitMs: 20_000,
 }
@@ -41,7 +43,7 @@ export function parseHeal(v: string | undefined): HealState {
 /** One more miss has been counted in s.strikes already. claudeAgeS null =
  *  unknown (no /proc): treated as old enough. */
 export function healDecision(s: HealState, claudeAgeS: number | null, now: number): 'wait' | 'heal' | 'ask_owner' {
-  if (s.fails >= healTiming.maxFails) return now - s.askedAt >= healTiming.askGapMs ? 'ask_owner' : 'wait'
+  if (s.fails >= healTiming.maxFails) return s.askedAt ? 'wait' : 'ask_owner'
   if (s.strikes < healTiming.strikes) return 'wait'
   if (claudeAgeS !== null && claudeAgeS < healTiming.minClaudeAgeS) return 'wait'
   if (now - s.lastAt < healTiming.cooldownMs) return 'wait'
@@ -60,10 +62,14 @@ export function repoIdFor(repoList: unknown, path: string): string | undefined {
 }
 
 // The keystrokes of ~/bin/ccsb-mcp-heal.py (tested there on Claude Code's /mcp
-// menu), with a screen check before each key. argv: orca binary, handle.
+// menu), with a screen check before each key. argv: orca binary, handle,
+// claude pid. Before typing: a live shim under that claude with no TCP link
+// to the broker means the network is down — "shim_alive", nothing typed. (A
+// shim linked to the broker but not bound to the topic — unbound after a
+// takeover — is healed: only a new shim process brings the key back.)
 export const HEAL_PY = String.raw`
-import json, re, subprocess, sys, time
-orca, handle = sys.argv[1:3]
+import json, os, re, subprocess, sys, time
+orca, handle, claude_pid = sys.argv[1:4]
 BUSY = re.compile(r'…\s*\(\d')
 def done(ok, why):
     print(json.dumps({"ok": ok, "why": why})); sys.exit(0)
@@ -96,8 +102,48 @@ def guard(cond, why):
     if not cond(s):
         back_out(); done(False, why)
     return s
+def kids():
+    out = {}
+    for p in os.listdir("/proc"):
+        if not p.isdigit(): continue
+        try:
+            ppid = int(open("/proc/%s/stat" % p).read().rsplit(")", 1)[1].split()[1])
+        except Exception:
+            continue
+        out.setdefault(ppid, []).append(int(p))
+    return out
+def shims(pid):
+    k, todo, found = kids(), [pid], []
+    while todo:
+        for c in k.get(todo.pop(), []):
+            todo.append(c)
+            try:
+                cmd = open("/proc/%d/cmdline" % c, "rb").read().split(b"\0")
+            except Exception:
+                continue
+            if any(a.endswith(b"server.ts") for a in cmd): found.append(c)
+    return found
+def broker_addr():
+    try:
+        for l in open(os.path.expanduser("~/.config/ccswitchboard/env")):
+            if l.startswith("CCSB_BROKER="):
+                return l.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+def linked(pids, addr):
+    if not addr or not pids: return False
+    r = subprocess.run(["ss", "-tnpH", "state", "established", "dst", addr], capture_output=True, text=True)
+    return any("pid=%d," % p in r.stdout for p in pids)
+if os.path.isdir("/proc") and claude_pid.isdigit():
+    alive = shims(int(claude_pid))
+    if alive and not linked(alive, broker_addr()): done(False, "shim_alive")
 s = screen()
 if s is None: done(False, "no_screen")
+if any("Manage MCP servers" in l for l in s):
+    # A menu left open by an interrupted heal: close it first.
+    back_out()
+    s = screen() or []
 if not idle(s): done(False, "busy")
 s = guard(idle, "changed")
 send("/mcp", enter=True); time.sleep(3)

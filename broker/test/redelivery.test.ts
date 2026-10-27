@@ -42,7 +42,7 @@ test('acked by A, A goes away, B connects → B gets it again, marked redelivere
   b.close()
 })
 
-test('backlog first, then redeliveries', async () => {
+test('redeliveries (older) first, then the backlog', async () => {
   const a = await deliverTo('A')
   queue(1)
   a.send({ t: 'ack', update_id: (await a.next('event')).update_id })
@@ -54,10 +54,10 @@ test('backlog first, then redeliveries', async () => {
   await b.next('welcome')
   const first = await b.next('event')
   const second = await b.next('event')
-  expect(first.text).toBe('m2')
-  expect(first.redelivered).toBeUndefined()
-  expect(second.text).toBe('m1')
-  expect(second.redelivered).toBe(true)
+  expect(first.text).toBe('m1')
+  expect(first.redelivered).toBe(true)
+  expect(second.text).toBe('m2')
+  expect(second.redelivered).toBeUndefined()
   b.close()
 })
 
@@ -124,4 +124,25 @@ test('broker restart between the ack and the new hello → still redelivered', a
   s.close()
   keep.rm()
   s = await startServer()
+})
+
+test('a repeated ack keeps the first delivered_at: the window does not slide', async () => {
+  serverTiming.redeliverWindowMs = 300
+  const a = await deliverTo('A')
+  queue(1)
+  a.send({ t: 'ack', update_id: (await a.next('event')).update_id })
+  await sleep(50)
+  a.close()
+  await sleep(50)
+  const b = await deliverTo('B')
+  const again = await b.next('event')
+  await sleep(250)
+  b.send({ t: 'ack', update_id: again.update_id })
+  await sleep(50)
+  b.close()
+  await sleep(50)
+  const c = await deliverTo('C')
+  await sleep(100)
+  expect(c.msgs.some(m => m.t === 'event')).toBe(false)
+  c.close()
 })

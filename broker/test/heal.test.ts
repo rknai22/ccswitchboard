@@ -20,9 +20,9 @@ test('healDecision: last heal under 300 s ago → wait', () => {
 test('healDecision: otherwise heal; unknown age counts as old', () => {
   expect(healDecision({ ...emptyHeal(), strikes: 2, lastAt: now - 301_000 }, null, now)).toBe('heal')
 })
-test('healDecision: 3 failures → ask the owner, then not again for 15 min', () => {
+test('healDecision: 3 failures → ask the owner once, never again until reset', () => {
   expect(healDecision({ ...emptyHeal(), strikes: 9, fails: healTiming.maxFails }, 600, now)).toBe('ask_owner')
-  expect(healDecision({ ...emptyHeal(), strikes: 9, fails: 3, askedAt: now - 60_000 }, 600, now)).toBe('wait')
+  expect(healDecision({ ...emptyHeal(), strikes: 9, fails: 3, askedAt: now - 24 * 3600_000 }, 600, now)).toBe('wait')
 })
 
 test('repoIdFor finds the project by path, trailing slash ignored', () => {

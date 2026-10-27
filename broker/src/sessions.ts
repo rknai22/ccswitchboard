@@ -635,7 +635,7 @@ async function heal(name: string, cen: Census, kp: KeyProcs): Promise<boolean> {
   }
   st.lastAt = now
   c.store.set(k(name, 'heal'), JSON.stringify(st))
-  const r = await runOnSessionHost(['python3', '-c', HEAL_PY, c.config.orca, term], { timeoutMs: 90_000, label: 'heal' })
+  const r = await runOnSessionHost(['python3', '-c', HEAL_PY, c.config.orca, term, String(kp.claude[0]!.pid)], { timeoutMs: 90_000, label: 'heal' })
   const j = parseJson(r.stdout)
   let ok = false
   if (j?.ok === true) {
@@ -645,9 +645,10 @@ async function heal(name: string, cen: Census, kp: KeyProcs): Promise<boolean> {
     }
   }
   c.log('heal', { topic: name, sent: j?.ok === true, why: String(j?.why ?? `exit ${r.code}`), connected: ok })
-  // "busy" or a changed screen is not a failed heal — just not now.
+  // Busy, a changed screen, or a shim that is alive but cut off (network) is
+  // not a failed heal — just nothing to type now.
   if (ok) c.store.del(k(name, 'heal'))
-  else if (j?.ok === true || !['busy', 'changed'].includes(String(j?.why))) {
+  else if (j?.ok === true || !['busy', 'changed', 'shim_alive'].includes(String(j?.why))) {
     st.fails++
     c.store.set(k(name, 'heal'), JSON.stringify(st))
   }
@@ -697,6 +698,12 @@ export async function onRestartCallback(cq: NonNullable<Update['callback_query']
     }
     await answer('callback_done')
     await closeTerminals(name, [{ handle: req.handle! }])
+    // Its claude needs a moment to exit; ensure() must not count it as alive.
+    for (const end = Date.now() + timing.closeSettleMs; Date.now() < end;) {
+      const kp = await keyProcesses(row.key)
+      if (kp.n === 0) break
+      await new Promise(r => setTimeout(r, 500))
+    }
     c.store.set(k(name, 'force_relaunch'), 1)
     c.store.del(k(name, 'launch_at'), k(name, 'heal'))
     c.log('restart_by_owner', { topic: name })
@@ -965,9 +972,11 @@ export const sessionsModule: BrokerModule = {
     // A module has no stop hook; do not keep a stopping broker alive.
     tickTimer.unref?.()
   },
-  async onUpdate(u) {
+  onUpdate(u) {
     if (!u.callback_query?.data?.startsWith('ccsr:')) return false
-    await onRestartCallback(u.callback_query)
+    // Off the poll loop: a restart can wait behind a heal and a launch, and
+    // every other update would wait with it.
+    void onRestartCallback(u.callback_query).catch(e => ctx().log('restart_failed', { err: e instanceof Error ? e.message : String(e) }))
     return true
   },
   async onLocked(c) {

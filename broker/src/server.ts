@@ -35,9 +35,10 @@ const HELLO_TIMEOUT_MS = 10_000
 const CAPS: Capability[] = ['ping', 'redelivery']
 
 export const serverTiming = {
-  /** How long a live shim has to answer ping; generous because a shim busy
-   *  sending a big file answers late. */
-  pingWaitMs: 10_000,
+  /** How long a live shim has to answer ping. Must stay well under the
+   *  shim's 10 s handshake timeout: the newcomer must still be there to take
+   *  the topic when a hung holder fails to answer. */
+  pingWaitMs: 5_000,
   redeliverWindowMs: 30 * 60_000,
 }
 // Biggest legit line: a reply with several 50 MB files in base64.
@@ -217,8 +218,11 @@ export class BrokerServer {
     c.instance = typeof h.instance === 'string' && h.instance ? h.instance.slice(0, 64) : undefined
     const name = topic.name
     const prev = this.helloChains.get(name) ?? Promise.resolve()
-    const run = prev.then(() => this.claim(c, name))
-    this.helloChains.set(name, run.catch(() => {}))
+    const run = prev.then(() => this.claim(c, name)).catch((e: unknown) => {
+      log('server', 'claim_failed', { conn: c.info.id, topic: name, err: e instanceof Error ? e.message : String(e) })
+      if (!c.sock.destroyed) this.reject(c, 'internal error')
+    })
+    this.helloChains.set(name, run)
   }
 
   /** Give the topic to c unless a live connection holds it. */
@@ -229,32 +233,32 @@ export class BrokerServer {
     const old = this.byTopic.get(name)
     if (old && old !== c && old.bound && !old.sock.destroyed && old.caps.has('ping')) {
       const alive = await this.ping(old, serverTiming.pingWaitMs)
-      if (c.sock.destroyed || this.stopped) return
+      if (this.stopped) return
       if (alive && this.byTopic.get(name) === old && old.bound) {
         log('server', 'takeover_refused', { conn: c.info.id, holder: old.info.id, topic: name })
         this.deps.onTakeoverRefused?.(name)
         return this.reject(c, `topic ${name} is held by a live session`)
       }
+      // Silent holder: hung, frozen or a half-open socket. Drop it even if the
+      // newcomer gave up meanwhile — its next try must find the topic free.
+      if (!alive && this.byTopic.get(name) === old) this.drop(old, name, 'did not answer ping')
+      if (c.sock.destroyed) return
+      // The topic may have been closed (or the setup reset) during the wait.
+      const now = this.deps.store.topic(name)
+      if (!this.deps.isLocked() || !now || now.state !== 'open') return this.reject(c, `topic ${name} is closed`)
     }
     const cur = this.byTopic.get(name)
-    if (cur && cur !== c) {
-      if (cur.instance) this.deps.store.set(`topic:${name}:instance_gone_at`, Date.now())
-      cur.bound = false
-      cur.send({ t: 'unbound', reason: 'replaced by a newer connection for this topic' })
-      cur.sock.end()
-      log('server', 'replaced', { conn: cur.info.id, by: c.info.id, topic: name })
-    }
+    if (cur && cur !== c) this.drop(cur, name, 'replaced by a newer connection for this topic', c.info.id)
     c.info = { id: c.info.id, mode: 'topic', topic: name }
     c.tools = [...TOPIC_TOOLS, ...(name === 'general' ? GENERAL_TOOLS : []), ...BOUND_SETUP_TOOLS]
     c.bound = true
     c.since = Date.now()
     this.byTopic.set(name, c)
     c.send({ t: 'welcome', mode: 'topic', topic: name, tools: c.tools })
-    const backlog = this.deps.store.undelivered(name)
-    for (const ev of backlog) c.send({ t: 'event', ...ev })
     const st = this.deps.store
     const prevInstance = st.get(`topic:${name}:instance`)
     let again = 0
+    // Redeliveries are older than the unacked backlog: they go first.
     if (c.instance && prevInstance && prevInstance !== c.instance && c.caps.has('redelivery')) {
       const goneAt = Number(st.get(`topic:${name}:instance_gone_at`) ?? 0) || Date.now()
       for (const ev of st.redeliverable(name, prevInstance, goneAt - serverTiming.redeliverWindowMs)) {
@@ -262,11 +266,23 @@ export class BrokerServer {
         again++
       }
     }
+    const backlog = st.undelivered(name)
+    for (const ev of backlog) c.send({ t: 'event', ...ev })
     if (c.instance) {
       st.set(`topic:${name}:instance`, c.instance)
       st.del(`topic:${name}:instance_gone_at`)
     }
     log('server', 'welcome', { conn: c.info.id, mode: 'topic', topic: name, backlog: backlog.length, redelivered: again, caps: [...c.caps].join(',') || null })
+  }
+
+  /** Unbind a topic's connection that is being replaced or is dead. */
+  private drop(old: Conn, name: string, reason: string, by?: number): void {
+    if (old.instance) this.deps.store.set(`topic:${name}:instance_gone_at`, Date.now())
+    if (this.byTopic.get(name) === old) this.byTopic.delete(name)
+    old.bound = false
+    old.send({ t: 'unbound', reason })
+    old.sock.destroy()
+    log('server', 'replaced', { conn: old.info.id, by: by ?? null, topic: name, reason })
   }
 
   /** true when c answers a fresh ping within ms; false on timeout or close. */
