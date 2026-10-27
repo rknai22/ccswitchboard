@@ -657,14 +657,41 @@ async function heal(name: string, cen: Census, kp: KeyProcs): Promise<boolean> {
 
 const RESTART_TTL_MS = 24 * 3600_000
 
-async function askRestart(name: string, handle: string): Promise<void> {
+async function askRestart(name: string, handle: string, where = 'general', textKey: 'heal_failed_ask' | 'restart_confirm' = 'heal_failed_ask'): Promise<void> {
   const c = ctx()
   const nonce = randomBytes(6).toString('base64url')
   c.store.set(k(name, 'restart'), JSON.stringify({ nonce, handle, expires: Date.now() + RESTART_TTL_MS }))
   const markup = { inline_keyboard: [[{ text: t(c.config.lang, 'restart_button', { name }), callback_data: `ccsr:${name}:${nonce}` }]] }
   c.log('restart_asked', { topic: name })
-  await c.tg.send('general', t(c.config.lang, 'heal_failed_ask', { name }), { reply_markup: markup })
+  await c.tg.send(where, t(c.config.lang, textKey, { name }), { reply_markup: markup })
     .catch(e => c.log('restart_ask_failed', { topic: name, err: e instanceof Error ? e.message : String(e) }))
+}
+
+/** /restart in a topic: a Restart button there when the session has one
+ *  terminal to close; a plain start when no Claude of the topic runs. */
+export function requestRestart(name: string): Promise<'asked' | 'launched' | 'unclear'> {
+  return serial(name, async () => {
+    const c = ctx()
+    const row = c.store.topic(name)
+    if (!row?.cwd || row.state !== 'open') return 'unclear' as const
+    const cen = await census(name, row.cwd)
+    const kp = await keyProcesses(row.key)
+    const term = cen.ours.length === 1 ? cen.ours[0]!.handle
+      : !cen.ours.length && cen.othersHandles.length === 1 ? cen.othersHandles[0]
+      : undefined
+    if (term) {
+      await askRestart(name, term, name, 'restart_confirm')
+      return 'asked' as const
+    }
+    if (kp.n === 0 && !cen.ours.length) {
+      c.store.del(k(name, 'launch_at'))
+      return 'launched' as const
+    }
+    return 'unclear' as const
+  }).then(async r => {
+    if (r === 'launched') await ensure(name)
+    return r
+  })
 }
 
 /** The owner pressed Restart: close exactly the terminal named in the button

@@ -30,6 +30,7 @@ import { Store, type StoredEvent } from './store.ts'
 import { t } from './strings.ts'
 import { Telegram, describeError, isParseError, type AllowedUpdate } from './telegram.ts'
 import { mdToHtml } from './markdown.ts'
+import { commandOf } from './commands.ts'
 
 const ACK_REACTION = '👀'
 const CONFLICT_NOTICE_EVERY_MS = 3600_000
@@ -114,6 +115,8 @@ export class Broker {
       log: (ev, f) => log('module', ev, f),
       isLocked: () => this.isLocked(),
       owner: () => (this.isLocked() ? { owner_id: this.sec!.owner_id!, chat_id: this.sec!.chat_id! } : null),
+      isBusy: topic => this.isTyping(topic),
+      pending: topic => this.store.undelivered(topic).length,
       unbind: (topic, reason) => this.server.unbind(topic, reason),
       isConnected: topic => this.server.connectedSince(topic) !== null,
       connectedSince: topic => this.server.connectedSince(topic),
@@ -252,6 +255,8 @@ export class Broker {
       log('core', 'drop_chat', { update_id: updateId, chat_id: m.chat.id })
       return 'drop'
     }
+    // Bot commands (/status, /restart, /help) are the commands module's.
+    if (typeof m.text === 'string' && commandOf(m.text)) return null
     const content = contentOf(m)
     if (!content) return null
     let topic = 'general'
@@ -440,6 +445,7 @@ export class Broker {
           if (typeof f?.name !== 'string' || typeof f.data_b64 !== 'string') throw new Error('reply: each file needs name and data_b64')
         }
         if (a.silent !== true) this.stopTyping(topic)
+        this.store.set(`topic:${topic}:last_reply_at`, Date.now())
         const message_ids = await this.sendTopic(topic, a.text, {
           format: formatOf(a.format),
           silent: a.silent === true,

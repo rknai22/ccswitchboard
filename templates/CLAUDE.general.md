@@ -10,8 +10,9 @@ Answer in the owner's language (the language of their messages).
 ## Talking to the owner
 
 - Reply only with the `reply` tool; terminal output never reaches Telegram.
-- For longer work send `⚙️ Now: <what you are doing>` with `reply` and keep it current
-  with `edit_message`; finish with a new `reply`.
+- For longer work send `⚙️ Now: <what you are doing>` with `reply` and `silent: true`, keep
+  it current with `edit_message`; finish with a new, loud `reply`. Replies are markdown by
+  default; long details go in a collapsed `>> quote` or a file.
 
 ## What you do
 

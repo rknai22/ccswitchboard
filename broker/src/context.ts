@@ -70,6 +70,10 @@ export type BrokerContext = {
   /** When (epoch ms) the topic's current shim connection was welcomed; null
    *  when none is bound. */
   connectedSince(topic: string): number | null
+  /** The topic's session got a message and has not answered it loudly yet. */
+  isBusy(topic: string): boolean
+  /** Number of the topic's events not yet acked by a shim. */
+  pending(topic: string): number
 }
 
 export type BrokerModule = {

@@ -110,6 +110,28 @@ const STRINGS = {
     en: 'topic {name}: the session is alive but its plugin is down, and reconnecting it did not help (3 tries). Restart the session? It resumes the same conversation.',
     ru: 'тема {name}: сессия жива, но её плагин упал, и переподключить не вышло (3 попытки). Перезапустить сессию? Разговор продолжится тот же.',
   },
+  restart_confirm: {
+    en: 'Restart the session of {name}? Its terminal is closed and Claude starts again with the same conversation.',
+    ru: 'Перезапустить сессию {name}? Её терминал закроется, Claude запустится заново с тем же разговором.',
+  },
+  restart_starting: { en: 'No session is running — starting one.', ru: 'Сессия не запущена — запускаю.' },
+  restart_unclear: {
+    en: 'Cannot tell which terminal is this session (several, or none recognised) — not touching anything. Close the extra ones in Orca.',
+    ru: 'Не могу понять, какой терминал — эта сессия (их несколько или ни одного опознанного), ничего не трогаю. Закрой лишние в Orca.',
+  },
+  status_up: { en: '🟢 session connected since {since}', ru: '🟢 сессия на связи с {since}' },
+  status_down: { en: '🔴 session not connected', ru: '🔴 сессия не на связи' },
+  status_busy: { en: 'working on a message', ru: 'работает над сообщением' },
+  status_idle: { en: 'idle', ru: 'свободна' },
+  status_pending: { en: 'waiting for delivery: {n}', ru: 'ждут доставки: {n}' },
+  status_last_reply: { en: 'last reply: {at}', ru: 'последний ответ: {at}' },
+  help: {
+    en: '/status — is the session connected, busy, anything waiting\n/restart — restart this topic\'s session (asks first)\n/help — this list\nAnything else goes to the session.',
+    ru: '/status — на связи ли сессия, занята ли, ждёт ли что-то\n/restart — перезапустить сессию этой темы (сначала спросит)\n/help — этот список\nВсё остальное уходит сессии.',
+  },
+  cmd_status: { en: 'session state', ru: 'состояние сессии' },
+  cmd_restart: { en: 'restart the session', ru: 'перезапустить сессию' },
+  cmd_help: { en: 'commands', ru: 'команды' },
   restart_button: { en: '🔄 Restart {name}', ru: '🔄 Перезапустить {name}' },
   restart_gone: { en: 'That terminal is already gone — nothing to restart.', ru: 'Этого терминала уже нет — перезапускать нечего.' },
   takeover_refused: {

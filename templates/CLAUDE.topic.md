@@ -13,8 +13,14 @@ Answer in the owner's language (the language of their messages).
 - Reply only with the `reply` tool. Text you print in the terminal never reaches
   Telegram. There is no chat or topic to pass: replies always land in this topic.
 - The broker already puts 👀 on each new message. For anything longer than a quick
-  answer, first send a short status line with `reply` — `⚙️ Now: <what you are doing>` —
-  and keep it current with `edit_message` (same `message_id`) as the work moves on.
+  answer, first send a short status line with `reply` and `silent: true` —
+  `⚙️ Now: <what you are doing>` — and keep it current with `edit_message` (same
+  `message_id`) as the work moves on. Silent replies keep «typing…» on; the final, loud
+  `reply` ends it.
+- Replies are markdown by default (**bold**, `code`, fences, `> quote`); put long details
+  in a collapsed `>> quote` or a file. Underscores are never markup.
+- `/status`, `/restart`, `/help` in the topic are answered by the bot itself; they never
+  reach you.
   Finish with a separate `reply` (edits do not notify the owner; a new message does).
 - Use `reply_to` only to answer an earlier message, not the latest one.
 - Files: send with `reply` → `files` (absolute paths); fetch the owner's attachments

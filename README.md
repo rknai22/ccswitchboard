@@ -69,7 +69,17 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     30 minutes, marked `redelivered="true"`. The session checks its
     conversation before acting on it. Delivery is at least once.
   - 👀 goes on the owner's message when the shim acknowledges it, not when the
-    broker receives it: no 👀 means the session has not got it.
+    broker receives it: no 👀 means the session has not got it. «typing…» then
+    stays up until the session's next non-silent reply (30 min at most).
+  - Replies are markdown by default, sent as Telegram HTML (`**bold**`,
+    `*italic*`, code, links, quotes, `>>` collapsed quotes); text over 8000
+    characters goes as its start plus `reply.md`. `reply.silent` sends without
+    a sound, for progress lines.
+  - A forwarded message carries its author (`forwarded_from`), a quote-reply
+    the quoted text (`reply_to_text`).
+  - `/status`, `/restart`, `/help` (the bot's command menu in the group) are
+    answered by the broker and never reach a session. `/restart` posts the
+    owner-only Restart button.
   - One connection per topic. A second connection with the same key (e.g. a
     stray shim started by `claude mcp list` inside a session) is refused while
     the current shim answers a ping; a shim that is gone or silent for 10 s
