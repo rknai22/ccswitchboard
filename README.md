@@ -63,6 +63,17 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     and the owner's DM go to General).
   - An event counts as delivered only when the session's shim acknowledges it.
     After a reconnect, everything unacknowledged is sent again, in order.
+  - An acknowledgement only says the shim handed the message to Claude. When a
+    **new** shim process takes the topic (the session restarted, e.g. after a
+    crash), it also gets what the previous one acknowledged in the last
+    30 minutes, marked `redelivered="true"`. The session checks its
+    conversation before acting on it. Delivery is at least once.
+  - 👀 goes on the owner's message when the shim acknowledges it, not when the
+    broker receives it: no 👀 means the session has not got it.
+  - One connection per topic. A second connection with the same key (e.g. a
+    stray shim started by `claude mcp list` inside a session) is refused while
+    the current shim answers a ping; a shim that is gone or silent for 10 s
+    is replaced.
   - It sends with the group's rate limits, splits long texts, and moves files as
     bytes. A session can edit or react only to messages of its own topic.
 - **The shim** (this repo's `plugin/`) is a Claude Code channel plugin.
@@ -88,6 +99,13 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     reported, not killed.
   - A dead session is relaunched with `--resume <session id>`. Only terminals
     the broker can prove it created are ever closed.
+  - **Heal** (`heal: true`): when Claude is alive but its plugin died, the
+    broker types `/mcp` → ccswitchboard → Reconnect into that session's only
+    terminal, if it looks idle, rechecking the screen before every key. After
+    3 failed tries the owner gets a «🔄 Restart» button in General; only that
+    press closes the terminal and relaunches it with `--resume`.
+  - Terminals open in the topic's own Orca project (`id:<repo-id>::<path>`),
+    so a folder that is a git worktree of another repo is not filed under it.
 - **Modules on top of the core:**
   - `pin` — one pinned «Claude limits» message in General, updated every
     5 minutes from the usage poller's file;
@@ -162,6 +180,7 @@ setup wizard.
 | `projects_root` | `~/projects` | topic folders live directly in it (on the session machine) |
 | `claude_cmd` | `claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions` | how a topic session is started; the broker prepends `CCSB_KEY=<key>` and appends `--resume <id>` |
 | `usage_file` | `~/.local/state/ccswitchboard/usage.json` | the usage poller's output on the session machine |
+| `heal` | `false` | heal a live Claude whose plugin died (see Heal above); turn it on only where no other healer types into the terminals |
 | `timezone` | `Europe/Moscow` | for times in the pin and the digest |
 | `digest_at` | `10:00` | daily digest time in `timezone` |
 
