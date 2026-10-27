@@ -100,9 +100,9 @@ const MAX_STATUS_WAIT_S = 30
 
 const FORMAT_PROP = {
   type: 'string',
-  enum: ['text', 'markdownv2'],
+  enum: ['markdown', 'text', 'markdownv2'],
   description:
-    "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+    "Rendering mode. Default 'markdown': **bold**, *italic*, ~~strike~~, `code`, ```fenced code```, [text](https://url), '# heading', '- item', '> quote', and '>> quote' for a collapsed quote (put long details there). No escaping needed; underscores are never markup. Text over 8000 chars is sent as its start plus the whole text as reply.md. 'text': plain. 'markdownv2': raw Telegram MarkdownV2 (caller escapes).",
 }
 
 const TOOL_DEFS: Record<ToolName, { name: ToolName; description: string; inputSchema: Record<string, unknown> }> = {
@@ -124,6 +124,10 @@ const TOOL_DEFS: Record<ToolName, { name: ToolName; description: string; inputSc
           description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. Max 50MB each.',
         },
         format: FORMAT_PROP,
+        silent: {
+          type: 'boolean',
+          description: "true: no notification sound. Use for progress and status lines ('⚙️ Now: …'); leave it off for results, questions and anything that needs the owner. A non-silent reply also ends the 'typing…' indicator.",
+        },
       },
       required: ['text'],
     },
@@ -601,10 +605,10 @@ function reqId(args: Record<string, unknown>, k: string): number {
   return n
 }
 
-function optFormat(args: Record<string, unknown>): 'text' | 'markdownv2' | undefined {
+function optFormat(args: Record<string, unknown>): 'markdown' | 'text' | 'markdownv2' | undefined {
   const v = args.format
   if (v == null) return undefined
-  if (v !== 'text' && v !== 'markdownv2') throw new Error(`format must be 'text' or 'markdownv2'`)
+  if (v !== 'markdown' && v !== 'text' && v !== 'markdownv2') throw new Error(`format must be 'markdown', 'text' or 'markdownv2'`)
   return v
 }
 
@@ -654,7 +658,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<str
       const files = readFiles(args.files)
       const r = await call(
         'reply',
-        { text, ...(reply_to != null ? { reply_to } : {}), ...(files.length ? { files } : {}), ...(format ? { format } : {}) },
+        { text, ...(reply_to != null ? { reply_to } : {}), ...(files.length ? { files } : {}), ...(format ? { format } : {}), ...(args.silent === true ? { silent: true } : {}) },
         files.length ? 300_000 : 120_000,
       )
       const ids = r.message_ids

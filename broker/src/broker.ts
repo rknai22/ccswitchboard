@@ -17,7 +17,7 @@
 //        Claude), not that the broker received it: no 👀 = not delivered.
 
 import type { Update, Message } from 'grammy/types'
-import type { Attachment, ToolName } from '../../plugin/protocol.ts'
+import { MAX_TEXT_CHUNK, type Attachment, type Format, type ToolName } from '../../plugin/protocol.ts'
 import { ensureStateDir, readSecret, writeSecret, deleteSecret, type Config, type Secret } from './config.ts'
 import { log, type BrokerContext, type BrokerModule, type ConnInfo, type SendOpts } from './context.ts'
 import { modules as defaultModules } from './modules.ts'
@@ -25,7 +25,8 @@ import { BrokerServer } from './server.ts'
 import { Setup } from './setup.ts'
 import { Store, type StoredEvent } from './store.ts'
 import { t } from './strings.ts'
-import { Telegram, describeError, type AllowedUpdate } from './telegram.ts'
+import { Telegram, describeError, isParseError, type AllowedUpdate } from './telegram.ts'
+import { mdToHtml } from './markdown.ts'
 
 const ACK_REACTION = '👀'
 const CONFLICT_NOTICE_EVERY_MS = 3600_000
@@ -400,7 +401,8 @@ export class Broker {
           if (typeof f?.name !== 'string' || typeof f.data_b64 !== 'string') throw new Error('reply: each file needs name and data_b64')
         }
         const message_ids = await this.sendTopic(topic, a.text, {
-          format: a.format === 'markdownv2' ? 'markdownv2' : 'text',
+          format: formatOf(a.format),
+          silent: a.silent === true,
           reply_to: a.reply_to !== undefined && a.reply_to !== null ? toId(a.reply_to, 'reply_to') : undefined,
           files: files.map(f => ({ name: safeName(f.name as string)!, data_b64: f.data_b64 as string })),
         })
@@ -421,8 +423,18 @@ export class Broker {
         if (typeof a.text !== 'string' || !a.text) throw new Error('edit_message: text must be a non-empty string')
         this.ownMessage(topic, mid)
         const { chat, id } = this.chatOf(mid)
-        const parse = a.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
-        await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, a.text as string, parse))
+        const fmt = formatOf(a.format)
+        const text = a.text as string
+        if (fmt === 'markdown') {
+          await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(text).slice(0, MAX_TEXT_CHUNK), { parse_mode: 'HTML' }))
+            .catch(e => {
+              if (!isParseError(e)) throw e
+              return this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, text))
+            })
+        } else {
+          const parse = fmt === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
+          await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, text, parse))
+        }
         return { message_id: mid }
       }
       case 'download_attachment': {
@@ -436,6 +448,11 @@ export class Broker {
     }
     throw new Error(`${tool}: not implemented yet`)
   }
+}
+
+/** reply/edit format; absent = markdown (the default since the UX block). */
+function formatOf(v: unknown): Format {
+  return v === 'text' || v === 'markdownv2' ? v : 'markdown'
 }
 
 function toId(v: unknown, name: string): number {

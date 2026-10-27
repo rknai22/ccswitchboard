@@ -16,7 +16,8 @@
 
 import { Api, GrammyError, HttpError, InputFile } from 'grammy'
 import type { Update } from 'grammy/types'
-import { MAX_DOWNLOAD_BYTES, MAX_TEXT_CHUNK, MAX_UPLOAD_BYTES, type FilePayload } from '../../plugin/protocol.ts'
+import { MAX_DOWNLOAD_BYTES, MAX_TEXT_CHUNK, MAX_UPLOAD_BYTES, type FilePayload, type Format } from '../../plugin/protocol.ts'
+import { AS_FILE_CHARS, mdChunks, mdToHtml } from './markdown.ts'
 import { botIdOf, type Config } from './config.ts'
 import { log } from './context.ts'
 import type { Store } from './store.ts'
@@ -47,6 +48,11 @@ const sleep = (ms: number, signal?: AbortSignal) =>
   })
 
 /** Split at ≤ limit, preferring paragraph, then line, then word boundaries. */
+/** Telegram refused the entities/HTML of a message. */
+export function isParseError(e: unknown): boolean {
+  return e instanceof GrammyError && e.error_code === 400 && /can't parse entities|unsupported start tag|can't find end/i.test(e.description)
+}
+
 export function chunk(text: string, limit = MAX_TEXT_CHUNK): string[] {
   if (text.length <= limit) return [text]
   const out: string[] = []
@@ -221,12 +227,18 @@ export class Telegram {
     threadId: number | null,
     text: string,
     opts: {
-      format?: 'text' | 'markdownv2'; reply_to?: number; files?: FilePayload[]; silent?: boolean; reply_markup?: unknown
+      format?: Format; reply_to?: number; files?: FilePayload[]; silent?: boolean; reply_markup?: unknown
       /** Called per sent message, so a failure halfway still records what went out. */
       onSent?: (id: number) => void
     },
   ): Promise<number[]> {
-    const files = opts.files ?? []
+    let files = opts.files ?? []
+    const md = opts.format === 'markdown'
+    if (md && text.length > AS_FILE_CHARS) {
+      // Too long to read as messages: the start here, everything in a file.
+      files = [{ name: 'reply.md', data_b64: Buffer.from(text).toString('base64') }, ...files]
+      text = `${mdChunks(text)[0] ?? ''}\n\n…`
+    }
     const decoded = files.map(f => {
       const buf = Buffer.from(f.data_b64, 'base64')
       if (buf.length > MAX_UPLOAD_BYTES) {
@@ -238,19 +250,25 @@ export class Telegram {
       ...(threadId !== null ? { message_thread_id: threadId } : {}),
       ...(opts.silent ? { disable_notification: true } : {}),
     }
-    const parse = opts.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
+    const parse = opts.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : md ? { parse_mode: 'HTML' as const } : {}
     const replyTo = opts.reply_to !== undefined ? { reply_parameters: { message_id: opts.reply_to } } : {}
-    const chunks = text.length ? chunk(text) : []
+    const plain = !text.length ? [] : md ? mdChunks(text) : chunk(text)
+    const chunks = md ? plain.map(mdToHtml) : plain
     const ids: number[] = []
     try {
       for (let i = 0; i < chunks.length; i++) {
         const last = i === chunks.length - 1
-        const m = await this.enqueue(chatId, true, api =>
-          api.sendMessage(chatId, chunks[i]!, {
-            ...base, ...parse, ...(i === 0 ? replyTo : {}),
-            ...(last && opts.reply_markup ? { reply_markup: opts.reply_markup as never } : {}),
-          }),
-        )
+        const extra = {
+          ...base, ...(i === 0 ? replyTo : {}),
+          ...(last && opts.reply_markup ? { reply_markup: opts.reply_markup as never } : {}),
+        }
+        const m = await this.enqueue(chatId, true, api => api.sendMessage(chatId, chunks[i]!, { ...extra, ...parse }))
+          .catch(async e => {
+            // Markup Telegram cannot parse: the same piece as plain text.
+            if (!md || !isParseError(e)) throw e
+            log('tg', 'markup_fallback', { len: plain[i]!.length })
+            return this.enqueue(chatId, true, api => api.sendMessage(chatId, plain[i]!, extra))
+          })
         ids.push(m.message_id)
         opts.onSent?.(m.message_id)
       }

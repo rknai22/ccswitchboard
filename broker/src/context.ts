@@ -11,7 +11,7 @@
 
 import type { Api } from 'grammy'
 import type { Update } from 'grammy/types'
-import type { FilePayload, InboundEvent, ToolName } from '../../plugin/protocol.ts'
+import type { FilePayload, Format, InboundEvent, ToolName } from '../../plugin/protocol.ts'
 import type { Config } from './config.ts'
 import type { Store, StoredEvent } from './store.ts'
 
@@ -30,7 +30,7 @@ export type ConnInfo = {
 }
 
 export type SendOpts = {
-  format?: 'text' | 'markdownv2'
+  format?: Format
   /** message_id in the same topic to quote-reply (first chunk only). */
   reply_to?: number
   files?: FilePayload[]

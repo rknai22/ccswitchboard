@@ -99,10 +99,13 @@ export type Pong = { t: 'pong'; nonce: string }
 
 export type FilePayload = { name: string; data_b64: string }
 
+/** markdown: the broker's small dialect → Telegram HTML (see broker/src/markdown.ts). */
+export type Format = 'text' | 'markdownv2' | 'markdown'
+
 export type CallArgs = {
-  reply: { text: string; reply_to?: number; files?: FilePayload[]; format?: 'text' | 'markdownv2' }
+  reply: { text: string; reply_to?: number; files?: FilePayload[]; format?: Format; silent?: boolean }
   react: { message_id: number; emoji: string }
-  edit_message: { message_id: number; text: string; format?: 'text' | 'markdownv2' }
+  edit_message: { message_id: number; text: string; format?: Format }
   download_attachment: { file_id: string }
   /** General only. name: [a-z0-9-]{1,32}; title: shown in Telegram. */
   create_topic: { name: string; title?: string }
