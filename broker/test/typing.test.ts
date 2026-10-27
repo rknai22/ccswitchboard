@@ -20,6 +20,7 @@ beforeEach(() => {
     sendMessage: async () => ({ message_id: 900 }),
   }
   ;(b.tg as any).enqueue = (_c: number, _m: boolean, fn: (a: any) => Promise<any>) => fn(api)
+  ;(b.tg as any).api = () => api
   ;(b.server as any).connectedSince = () => 1
 })
 afterEach(() => {

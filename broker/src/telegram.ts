@@ -237,7 +237,7 @@ export class Telegram {
     if (md && text.length > AS_FILE_CHARS) {
       // Too long to read as messages: the start here, everything in a file.
       files = [{ name: 'reply.md', data_b64: Buffer.from(text).toString('base64') }, ...files]
-      text = `${mdChunks(text)[0] ?? ''}\n\n…`
+      text = `${mdChunks(text, 3000)[0] ?? ''}\n\n…`
     }
     const decoded = files.map(f => {
       const buf = Buffer.from(f.data_b64, 'base64')

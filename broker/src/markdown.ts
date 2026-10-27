@@ -11,21 +11,22 @@
 // [text](http… url), "# heading" → bold line, "- item"/"* item" → "• item",
 // "> quote" → blockquote, ">> quote" → collapsed (expandable) blockquote.
 
-import { MAX_TEXT_CHUNK } from '../../plugin/protocol.ts'
-
 /** Above this many characters the full text goes as a file, the start as a message. */
 export const AS_FILE_CHARS = 8000
 /** Markdown budget per chunk: HTML tags make it longer. */
 const CHUNK_MD = 3500
 
+const FENCE = /^```\s*([\w+-]*)\s*$/
+const FENCE_END = /^```\s*$/
+
 export const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 function inline(s: string): string {
-  // Code spans first, kept out of every other rule.
+  // Code spans first, kept out of every other rule (and out of URLs).
   const codes: string[] = []
   s = s.replace(/`([^`\n]+)`/g, (_, c: string) => `\u0000${codes.push(c) - 1}\u0000`)
   const links: string[] = []
-  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, text: string, url: string) =>
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, (_, text: string, url: string) =>
     `\u0001${links.push(`<a href="${esc(url).replace(/"/g, '&quot;')}">${esc(text)}</a>`) - 1}\u0001`)
   s = esc(s)
   s = s.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, '<b>$1</b>')
@@ -38,14 +39,15 @@ function inline(s: string): string {
 /** One markdown chunk → Telegram HTML. */
 export function mdToHtml(md: string): string {
   const out: string[] = []
-  const lines = md.split('\n')
+  // Our placeholders must not come from the text itself.
+  const lines = md.replace(/[\u0000\u0001]/g, '').split('\n')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
-    const fence = /^```\s*([\w+-]*)\s*$/.exec(line)
+    const fence = FENCE.exec(line)
     if (fence) {
       const body: string[] = []
       i++
-      while (i < lines.length && !/^```\s*$/.test(lines[i]!)) body.push(lines[i++]!)
+      while (i < lines.length && !FENCE_END.test(lines[i]!)) body.push(lines[i++]!)
       const lang = fence[1] ? ` class="language-${fence[1]}"` : ''
       out.push(`<pre><code${lang}>${esc(body.join('\n'))}</code></pre>`)
       continue
@@ -78,39 +80,59 @@ export function mdToHtml(md: string): string {
   return out.join('\n')
 }
 
-/** Split markdown at blank lines (else line ends) outside code fences. */
+/** Split markdown into chunks of at most `limit` characters: at blank lines
+ *  outside code fences where possible, else at line ends, else inside a long
+ *  line. A fence cut in two is closed at the end of one chunk and reopened
+ *  (same language) at the start of the next, so code stays code. */
 export function mdChunks(md: string, limit = CHUNK_MD): string[] {
-  const blocks: string[] = []
-  let cur: string[] = []
-  let inFence = false
-  for (const line of md.split('\n')) {
-    if (/^```/.test(line)) inFence = !inFence
-    cur.push(line)
-    if (!inFence && line.trim() === '') {
-      blocks.push(cur.join('\n'))
-      cur = []
-    }
-  }
-  if (cur.length) blocks.push(cur.join('\n'))
   const out: string[] = []
-  let acc = ''
+  let acc: string[] = []
+  let size = 0
+  let fence: string | null = null // the opening line while inside a fence
   const flush = () => {
-    if (acc.trim()) out.push(acc.replace(/\n+$/, ''))
-    acc = ''
+    if (fence !== null) acc.push('```')
+    const text = acc.join('\n').replace(/\n+$/, '')
+    if (text.trim()) out.push(text)
+    acc = fence !== null ? [fence] : []
+    size = fence !== null ? fence.length + 1 : 0
   }
-  for (const b of blocks) {
-    if (acc && acc.length + b.length + 1 > limit) flush()
-    if (b.length <= limit) {
-      acc += (acc ? '\n' : '') + b
-      continue
-    }
-    // A single oversized block: cut at line ends.
-    for (const line of b.split('\n')) {
-      if (acc && acc.length + line.length + 1 > limit) flush()
-      acc += (acc ? '\n' : '') + line.slice(0, MAX_TEXT_CHUNK)
-    }
+  const room = () => limit - size - (fence !== null ? 4 : 0)
+  const push = (line: string) => {
+    acc.push(line)
+    size += line.length + 1
   }
+  const lines = md.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i]!
+    const opens = fence === null && FENCE.test(line)
+    const closes = fence !== null && FENCE_END.test(line)
+    // At a blank line outside a fence: cut here when the next paragraph would
+    // not fit, rather than in its middle.
+    if (fence === null && line.trim() === '' && size > 0) {
+      let next = 0
+      for (let j = i + 1; j < lines.length && lines[j]!.trim() !== ''; j++) next += lines[j]!.length + 1
+      if (size + 1 + next > room()) {
+        flush()
+        continue
+      }
+    }
+    while (line.length + 1 > room()) {
+      if (acc.length > (fence !== null ? 1 : 0)) {
+        flush()
+        continue
+      }
+      // A single line longer than a chunk: cut it.
+      const n = Math.max(1, room() - 1)
+      push(line.slice(0, n))
+      line = line.slice(n)
+      flush()
+    }
+    push(line)
+    if (opens) fence = line
+    if (closes) fence = null
+  }
+  if (fence !== null) fence = null
   flush()
-  return out
+  return out.length ? out : ['']
 }
 // === GRACE END_BLOCK: broker_markdown =========================================

@@ -25,7 +25,10 @@ import { t } from './strings.ts'
 export const taskLimits = {
   proposalTtlMs: 7 * 24 * 3600_000,
   titleChars: 200,
-  specChars: 12_000,
+  /** One message on the owner's screen: the owner approves only what they saw. */
+  specChars: 3_300,
+  /** loud done/blocked/waiting_owner notices per topic per hour */
+  noticesPerHour: 6,
   summaryChars: 1000,
   questionChars: 1000,
   optionChars: 40,
@@ -164,7 +167,10 @@ async function proposeTask(a: Record<string, unknown>, conn: ConnInfo, c: Broker
   if (!row || topic === 'general') throw new Error(`propose_task: no topic ${topic || '(empty)'}`)
   if (row.state !== 'open') throw new Error(`propose_task: topic ${topic} is closed`)
   const title = cap(a.title, taskLimits.titleChars)
-  const spec = cap(a.spec, taskLimits.specChars)
+  const raw = typeof a.spec === 'string' ? a.spec.trim() : ''
+  if (raw.length > taskLimits.specChars) throw new Error(`propose_task: spec is ${raw.length} chars; keep it under ${taskLimits.specChars} so the owner sees all of it on one screen (put long material in the topic's repo and point to it)`)
+  // No collapsed quotes: the owner must see every line they approve.
+  const spec = raw.replace(/^>>/gm, '>')
   if (!title || !spec) throw new Error('propose_task: title and spec are required')
   const id = insertTask({ topic, title, spec, state: 'proposed', source: 'general' })
   event(id, 'general', 'proposed')
@@ -177,7 +183,8 @@ async function proposeTask(a: Record<string, unknown>, conn: ConnInfo, c: Broker
   }
   const ids = await c.tg.send('general', `${t(L, 'task_proposed', { id, topic, title })}\n\n${spec}`, { format: 'markdown', reply_markup: markup })
   const mid = ids[ids.length - 1]!
-  setState(id, 'proposed', { proposal_msg: mid })
+  // Only the message id: the owner may have pressed a button meanwhile.
+  c.store.db.query('UPDATE tasks SET proposal_msg = ? WHERE id = ?').run(mid, id)
   c.log('task_proposed', { id, topic, len: spec.length })
   return { task_id: id, message_id: mid }
 }
@@ -201,12 +208,13 @@ async function report(a: Record<string, unknown>, conn: ConnInfo, c: BrokerConte
     if (!r) throw new Error(`report: no task #${a.task_id}`)
     if (r.topic !== topic) throw new Error(`report: task #${id} belongs to topic ${r.topic}`)
     if (r.state === 'proposed') throw new Error(`report: task #${id} is not approved yet`)
+    if (r.state === 'cancelled') throw new Error(`report: task #${id} was cancelled`)
   }
   setState(id, state, { summary, next_step: next, last_report_at: Date.now() })
   event(id, topic, state, summary)
   const r = task(id)!
   c.log('task_report', { id, topic, state })
-  if (state === 'done' || state === 'blocked' || state === 'waiting_owner') {
+  if ((state === 'done' || state === 'blocked' || state === 'waiting_owner') && noticeAllowed(topic)) {
     await c.tg.send('general', t(c.config.lang, `task_${state}`, { icon: ICON[state], topic, id, title: r.title, summary }), { format: 'text' })
       .catch(e => c.log('task_notice_failed', { id, err: e instanceof Error ? e.message : String(e) }))
   }
@@ -238,6 +246,21 @@ async function askOwner(a: Record<string, unknown>, conn: ConnInfo, c: BrokerCon
   c.store.db.query('UPDATE questions SET message_id = ? WHERE id = ?').run(mid, qid)
   c.log('question_asked', { topic, qid, options: options.length })
   return { question_id: qid, message_id: mid }
+}
+
+const noticeLog = new Map<string, number[]>()
+
+/** A looping session must not flood General: a few loud notices per hour. */
+function noticeAllowed(topic: string): boolean {
+  const now = Date.now()
+  const recent = (noticeLog.get(topic) ?? []).filter(x => now - x < 3600_000)
+  if (recent.length >= taskLimits.noticesPerHour) {
+    ctx().log('task_notice_suppressed', { topic })
+    return false
+  }
+  recent.push(now)
+  noticeLog.set(topic, recent)
+  return true
 }
 
 const tellLog = new Map<string, number[]>()
@@ -294,7 +317,17 @@ async function onTaskButton(cq: NonNullable<Update['callback_query']>, c: Broker
   event(id, 'owner', 'approved')
   await answer('callback_done')
   const text = `${t(L, 'task_assigned', { id, title: r.title })}\n\n${r.spec ?? ''}`
-  const ids = await c.tg.send(r.topic, text, { format: 'markdown' })
+  let ids: number[]
+  try {
+    ids = await c.tg.send(r.topic, text, { format: 'markdown' })
+  } catch (e) {
+    // Not delivered: back to proposed so the same button works again.
+    setState(id, 'proposed')
+    event(id, 'broker', 'send_failed')
+    c.log('task_send_failed', { id, topic: r.topic, err: e instanceof Error ? e.message : String(e) })
+    await c.notifyGeneral(t(L, 'task_send_failed', { id, topic: r.topic }))
+    return
+  }
   c.enqueueEvent(r.topic, {
     message_id: ids[0]!, user: cq.from.username ?? String(cq.from.id), user_id: String(cq.from.id), ts: new Date().toISOString(),
     text: `${t(L, 'task_assigned', { id, title: r.title })}\n\n${r.spec ?? ''}`,
@@ -337,6 +370,8 @@ export const tasksModule: BrokerModule = {
   start(c) {
     ctxRef = c
     initTables(c)
+    noticeLog.clear()
+    tellLog.clear()
   },
   onUpdate(u, c) {
     const data = u.callback_query?.data

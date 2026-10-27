@@ -118,6 +118,7 @@ const STRINGS = {
   },
   task_proposed: { en: '📝 Task #{id} for {topic}: {title}', ru: '📝 Задача #{id} для {topic}: {title}' },
   task_send_button: { en: '✅ Send to {topic}', ru: '✅ Отправить в {topic}' },
+  task_send_failed: { en: 'Task #{id} could not be posted in {topic} — press ✅ again.', ru: 'Задачу #{id} не удалось отправить в {topic} — нажми ✅ ещё раз.' },
   task_cancel_button: { en: '❌ Cancel', ru: '❌ Отменить' },
   task_sent: { en: '✅ sent to {topic}', ru: '✅ отправлено в {topic}' },
   task_cancelled: { en: '✖️ cancelled', ru: '✖️ отменено' },

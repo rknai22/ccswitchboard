@@ -129,3 +129,37 @@ test('tell_topic: visible copy, from_topic, not the owner; no General; hourly li
   for (let i = 1; i < taskLimits.tellPerHour; i++) await call('tell_topic', { topic: 'crm', text: `m${i}` }, wms)
   await expect(call('tell_topic', { topic: 'crm', text: 'over' }, wms)).rejects.toThrow(/limit/)
 })
+
+test('a spec too long to see on one screen is refused', async () => {
+  await expect(call('propose_task', { topic: 'wms', title: 'L', spec: 'x'.repeat(taskLimits.specChars + 1) }, general)).rejects.toThrow(/one screen/)
+})
+
+test('collapsed quotes are opened in a proposal', async () => {
+  await call('propose_task', { topic: 'wms', title: 'Q', spec: '>> hidden part' }, general)
+  expect(sent.at(-1)!.text).not.toContain('expandable')
+})
+
+test('sending the approved task fails → back to proposed, the button works again', async () => {
+  const r = await call('propose_task', { topic: 'wms', title: 'F', spec: 's' }, general)
+  const real = (b.tg as any).enqueue
+  let fail = true
+  ;(b.tg as any).enqueue = (c: number, m: boolean, fn: any) => (fail && c === -100 && m ? (fail = false, Promise.reject(new Error('net'))) : real(c, m, fn))
+  await press(`ccst:${r.task_id}:ok`)
+  expect(queued('wms')).toHaveLength(0)
+  ;(b.tg as any).enqueue = real
+  await press(`ccst:${r.task_id}:ok`)
+  expect(queued('wms')).toHaveLength(1)
+})
+
+test('no reports on a cancelled task', async () => {
+  const r = await call('propose_task', { topic: 'wms', title: 'C', spec: 's' }, general)
+  await press(`ccst:${r.task_id}:no`)
+  await expect(call('report', { task_id: r.task_id, state: 'done', summary: 'x' }, wms)).rejects.toThrow(/cancelled/)
+})
+
+test('loud notices are capped per topic per hour', async () => {
+  const r = await call('report', { title: 'N', state: 'in_progress', summary: 's' }, wms)
+  const before = sent.length
+  for (let i = 0; i < taskLimits.noticesPerHour + 3; i++) await call('report', { task_id: r.task_id, state: 'blocked', summary: `b${i}` }, wms)
+  expect(sent.length - before).toBe(taskLimits.noticesPerHour)
+})

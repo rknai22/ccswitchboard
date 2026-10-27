@@ -37,7 +37,7 @@ import { Setup } from './setup.ts'
 import { Store, type StoredEvent } from './store.ts'
 import { t } from './strings.ts'
 import { Telegram, describeError, isParseError, type AllowedUpdate } from './telegram.ts'
-import { mdToHtml } from './markdown.ts'
+import { mdChunks, mdToHtml } from './markdown.ts'
 import { VOICE_KINDS, openaiKey, transcribe } from './voice.ts'
 import { commandOf } from './commands.ts'
 
@@ -345,12 +345,19 @@ export class Broker {
   /** Keep "typing…" up in the topic while its session works on a message. */
   startTyping(topic: string, chat: number, thread: number | null): void {
     this.stopTyping(topic)
+    // Straight to the API, not through the chat's ordered queue: a typing
+    // call must never wait for (or hold up) a reply. One in flight at a time,
+    // errors dropped.
+    let inFlight = false
     const send = () => {
       const loop = this.typingLoops.get(topic)
       if (!loop || Date.now() > loop.until || this.server.connectedSince(topic) === null) return this.stopTyping(topic)
-      void this.tg.enqueue(chat, false, api =>
-        api.sendChatAction(chat, 'typing', thread !== null ? { message_thread_id: thread } : {}),
-      ).catch(() => {})
+      const api = this.tg.api()
+      if (!api || inFlight) return
+      inFlight = true
+      void api.sendChatAction(chat, 'typing', thread !== null ? { message_thread_id: thread } : {})
+        .catch(() => {})
+        .finally(() => { inFlight = false })
     }
     const timer = setInterval(send, typingTiming.everyMs)
     timer.unref?.()
@@ -502,10 +509,12 @@ export class Broker {
         const fmt = formatOf(a.format)
         const text = a.text as string
         if (fmt === 'markdown') {
-          await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(text).slice(0, MAX_TEXT_CHUNK), { parse_mode: 'HTML' }))
+          // An edit is one message: the first chunk only, converted whole.
+          const first = mdChunks(text)[0] ?? text
+          await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(first), { parse_mode: 'HTML' }))
             .catch(e => {
               if (!isParseError(e)) throw e
-              return this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, text))
+              return this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, first.slice(0, MAX_TEXT_CHUNK)))
             })
         } else {
           const parse = fmt === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
