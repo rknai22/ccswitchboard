@@ -6,7 +6,8 @@
   "license": "Apache-2.0",
   "bin": { "ccswitchboard-broker": "src/main.ts" },
   "scripts": {
-    "serve": "bun src/main.ts serve"
+    "serve": "bun src/main.ts serve",
+    "test": "bun test"
   },
   "dependencies": {
     "grammy": "1.46.0"

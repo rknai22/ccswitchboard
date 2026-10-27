@@ -29,8 +29,13 @@ export type ToolName = TopicTools | GeneralTools | SetupTools
 
 // ---- handshake ---------------------------------------------------------------
 
-/** First line from the shim. No key = setup mode (only SetupTools allowed). */
-export type Hello = { t: 'hello'; v: typeof PROTOCOL_VERSION; key?: string }
+/** What a shim understands beyond v1; old shims send none. */
+export type Capability = 'ping' | 'redelivery'
+
+/** First line from the shim. No key = setup mode (only SetupTools allowed).
+ *  instance: random per shim process — tells a reconnect of the same process
+ *  from a new process (a restarted session). */
+export type Hello = { t: 'hello'; v: typeof PROTOCOL_VERSION; key?: string; instance?: string; caps?: Capability[] }
 
 /** Broker answer to hello. `tools` is what this connection may call. */
 export type Welcome = {
@@ -72,6 +77,9 @@ export type InboundEvent = {
   forwarded_from_general?: { message_id: number }
   /** Present when the owner quote-replied to an earlier message. */
   reply_to?: { message_id: number; text?: string }
+  /** Sent again to a new shim instance: the previous one acked it, but its
+   *  session may have died before Claude kept it. Only to caps 'redelivery'. */
+  redelivered?: true
 }
 
 /** Shim confirms it handed the event to Claude; broker marks it delivered. */
@@ -79,6 +87,13 @@ export type Ack = { t: 'ack'; update_id: number }
 
 /** Broker → shim: the binding is gone (topic closed/deleted, setup reset). */
 export type Unbound = { t: 'unbound'; reason: string }
+
+/** Broker → shim (caps 'ping'): are you alive? Asked before another hello
+ *  with the same key may take the topic. */
+export type Ping = { t: 'ping'; nonce: string }
+
+/** Shim → broker: answer to ping, same nonce. */
+export type Pong = { t: 'pong'; nonce: string }
 
 // ---- tool calls ----------------------------------------------------------------
 
@@ -126,8 +141,8 @@ export type Result<T extends ToolName = ToolName> =
   | { t: 'result'; id: string; ok: true; data: CallResults[T] }
   | { t: 'result'; id: string; ok: false; error: string }
 
-export type ShimToBroker = Hello | Ack | Call
-export type BrokerToShim = Welcome | Reject | InboundEvent | Unbound | Result
+export type ShimToBroker = Hello | Ack | Call | Pong
+export type BrokerToShim = Welcome | Reject | InboundEvent | Unbound | Result | Ping
 
 // ---- framing -------------------------------------------------------------------
 
