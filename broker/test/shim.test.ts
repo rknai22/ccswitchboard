@@ -128,3 +128,15 @@ test('quote text and forward origin reach the meta, cleaned', async () => {
   expect(meta.forwarded_from).toBe('Ann (@ann)')
   expect(meta.forwarded_date).toBe('2026-10-28T00:00:00.000Z')
 })
+
+test('task_id, from_topic and answer_to reach the meta', async () => {
+  await broker.next('hello')
+  broker.send(ev(12, { task_id: 7, from_topic: 'crm', answer_to: { question_id: 3, question: 'Push?' } }))
+  await broker.next('ack')
+  await sleep(50)
+  const meta = notes.find(x => x.method === 'notifications/claude/channel').params.meta
+  expect(meta.task_id).toBe('7')
+  expect(meta.from_topic).toBe('crm')
+  expect(meta.answer_to_question_id).toBe('3')
+  expect(meta.answer_to_question).toBe('Push?')
+})

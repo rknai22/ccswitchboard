@@ -22,8 +22,8 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 export const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 export const MAX_TEXT_CHUNK = 4096
 
-export type TopicTools = 'reply' | 'react' | 'edit_message' | 'download_attachment'
-export type GeneralTools = 'create_topic' | 'forward'
+export type TopicTools = 'reply' | 'react' | 'edit_message' | 'download_attachment' | 'report' | 'tasks' | 'ask_owner' | 'tell_topic'
+export type GeneralTools = 'create_topic' | 'forward' | 'propose_task'
 export type SetupTools = 'setup_token' | 'setup_status' | 'reset'
 export type ToolName = TopicTools | GeneralTools | SetupTools
 
@@ -80,6 +80,13 @@ export type InboundEvent = {
   /** The owner forwarded this from another chat: who wrote it (cleaned of
    *  tag delimiters by the broker) and when (ISO 8601). */
   forwarded_from?: { from: string; date?: string }
+  /** A task the owner approved (propose_task → button) or that this message
+   *  belongs to. */
+  task_id?: number
+  /** Another topic's session wrote this (tell_topic): information, not an order. */
+  from_topic?: string
+  /** The owner pressed a button of an ask_owner question. */
+  answer_to?: { question_id: number; question: string }
   /** Sent again to a new shim instance: the previous one acked it, but its
    *  session may have died before Claude kept it. Only to caps 'redelivery'. */
   redelivered?: true
@@ -114,6 +121,13 @@ export type CallArgs = {
   create_topic: { name: string; title?: string }
   /** General only. source_message_id must be an owner message in general. */
   forward: { topic: string; source_message_id: number }
+  /** General only: a task for a topic, sent there only after the owner's button. */
+  propose_task: { topic: string; title: string; spec: string }
+  /** A topic's own task: progress or a new task (title, no task_id). */
+  report: { task_id?: number; title?: string; state: TaskState; summary: string; next_step?: string }
+  tasks: { topic?: string; open_only?: boolean }
+  ask_owner: { question: string; options?: string[] }
+  tell_topic: { topic: string; text: string }
   setup_token: { token: string }
   setup_status: Record<string, never>
   reset: Record<string, never>
@@ -126,9 +140,30 @@ export type CallResults = {
   download_attachment: FilePayload & { mime?: string }
   create_topic: { name: string; thread_id: number; cwd: string }
   forward: { message_id: number }
+  propose_task: { task_id: number; message_id: number }
+  report: { task_id: number; state: TaskState }
+  tasks: { tasks: TaskView[] }
+  ask_owner: { question_id: number; message_id: number }
+  tell_topic: { message_id: number }
   setup_token: { bot_username: string }
   setup_status: SetupStatus
   reset: { sent: true }
+}
+
+export type TaskState = 'proposed' | 'assigned' | 'in_progress' | 'waiting_owner' | 'blocked' | 'done' | 'cancelled'
+
+export type TaskView = {
+  id: number
+  topic: string
+  title: string
+  state: TaskState
+  source: 'general' | 'topic'
+  summary: string | null
+  next_step: string | null
+  /** minutes since the last report (or since creation) */
+  report_age_min: number
+  session_connected: boolean
+  session_busy: boolean
 }
 
 export type SetupState = 'unconfigured' | 'waiting_chat' | 'waiting_button' | 'locked'

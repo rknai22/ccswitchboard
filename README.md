@@ -95,6 +95,23 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     the owner's own message from General in a topic («📨 from the owner via
     General: …») and delivers it to that topic's session. A session's own text
     cannot be forwarded.
+- **Tasks (the orchestrator).** The broker keeps a task registry (a topic can
+  have many tasks):
+  - `propose_task` (General): a full spec General wrote from the owner's note.
+    It appears in General with ✅ Send / ❌ Cancel; only the owner's press
+    delivers exactly that text to the topic, as the owner's words, with its
+    `task_id`.
+  - `report` (a topic, on its own tasks): in_progress / waiting_owner /
+    blocked / done / cancelled with a summary; a topic registers work given to
+    it directly the same way. done / blocked / waiting_owner are announced in
+    General by the broker.
+  - `tasks`: General sees all, a topic its own — with the age of the last
+    report, so silence shows. `/tasks` in a topic (or General) lists them.
+  - `ask_owner`: a question with answer buttons; only the owner's press counts
+    and comes back to the session. Push / PR / deletions are asked this way.
+  - `tell_topic`: information to another topic's session (visible copy there,
+    `from_topic`, never an order; 10 per hour per pair; not to General).
+  - Temporary workers: General uses Orca's own orchestration (worktree + agent).
 - **Topics → sessions.** `create_topic` does all of this:
   - creates the Telegram topic and gives it a fresh key;
   - prepares `<projects_root>/<name>`: `git init` (an existing git folder, e.g.

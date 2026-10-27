@@ -14,10 +14,11 @@ import type { BrokerContext, BrokerModule } from './context.ts'
 import { safeTz } from './pin.ts'
 import { requestRestart } from './sessions.ts'
 import { t } from './strings.ts'
+import { tasksText } from './tasks.ts'
 
-export type Command = 'status' | 'restart' | 'help'
+export type Command = 'status' | 'tasks' | 'restart' | 'help'
 
-const CMD_RE = /^\/(status|restart|help)(?:@\w+)?\s*$/
+const CMD_RE = /^\/(status|tasks|restart|help)(?:@\w+)?\s*$/
 
 export function commandOf(text: string): Command | null {
   const m = CMD_RE.exec(text.trim())
@@ -57,6 +58,8 @@ async function run(cmd: Command, topic: string, ctx: BrokerContext): Promise<voi
       return say(statusText(ctx, topic))
     case 'help':
       return say(t(L, 'help'))
+    case 'tasks':
+      return say(tasksText(ctx, topic === 'general' ? null : topic))
     case 'restart': {
       const r = await requestRestart(topic)
       if (r === 'launched') return say(t(L, 'restart_starting'))
@@ -85,7 +88,7 @@ export const commandsModule: BrokerModule = {
     const owner = ctx.owner()
     if (!owner) return
     const L = ctx.config.lang
-    const commands = (['status', 'restart', 'help'] as const).map(c => ({ command: c, description: t(L, `cmd_${c}`) }))
+    const commands = (['status', 'tasks', 'restart', 'help'] as const).map(c => ({ command: c, description: t(L, `cmd_${c}`) }))
     await ctx.tg.call(api => api.setMyCommands(commands, { scope: { type: 'chat', chat_id: owner.chat_id } }))
       .then(() => ctx.log('commands_set', { n: commands.length }))
       .catch(e => ctx.log('commands_set_failed', { err: e instanceof Error ? e.message : String(e) }))

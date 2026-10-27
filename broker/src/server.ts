@@ -44,8 +44,8 @@ export const serverTiming = {
 // Biggest legit line: a reply with several 50 MB files in base64.
 const MAX_LINE_CHARS = 400 * 1024 * 1024
 
-export const TOPIC_TOOLS: TopicTools[] = ['reply', 'react', 'edit_message', 'download_attachment']
-export const GENERAL_TOOLS: GeneralTools[] = ['create_topic', 'forward']
+export const TOPIC_TOOLS: TopicTools[] = ['reply', 'react', 'edit_message', 'download_attachment', 'report', 'tasks', 'ask_owner', 'tell_topic']
+export const GENERAL_TOOLS: GeneralTools[] = ['create_topic', 'forward', 'propose_task']
 export const SETUP_TOOLS: SetupTools[] = ['setup_token', 'setup_status', 'reset']
 /** Bound sessions may ask for a reset (only the owner's button press applies
  *  it) and read the state; setup_token stays keyless-only. */
