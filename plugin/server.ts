@@ -14,6 +14,8 @@
 //        stderr (never the key, the token or message text).
 //   INV: an event is acked only after Claude Code accepted the notification;
 //        a repeated update_id is acked again but never handed to Claude twice.
+//   INV: ping is answered straight from the socket handler, never behind the
+//        delivery chain — a busy shim must not look dead and lose its topic.
 //   INV: the tool list is what the broker's last welcome allowed; broker
 //        trouble is a tool error (isError), never a crash or a hang.
 //   INV: after `unbound` no topic event reaches Claude and topic tools refuse.
@@ -21,6 +23,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { randomUUID } from 'crypto'
 import { createConnection, type Socket } from 'net'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } from 'fs'
 import { homedir } from 'os'
@@ -66,6 +69,8 @@ try {
 const STATE_DIR = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'ccswitchboard')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const BROKER = (process.env.CCSB_BROKER ?? '').trim() || DEFAULT_BROKER
+/** One per shim process: lets the broker tell a reconnect from a restart. */
+const INSTANCE = randomUUID()
 let key: string | undefined = (process.env.CCSB_KEY ?? '').trim() || undefined
 
 let ADDR: { host: string; port: number } | null = null
@@ -241,7 +246,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'This session is bound to one Telegram forum topic. Messages arrive as <channel source="ccswitchboard" topic="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has forwarded_from_general_message_id, these are the owner\'s words relayed from the General topic. Reply with the reply tool — the reply always goes to this topic, there is no chat or topic to pass. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'This session is bound to one Telegram forum topic. Messages arrive as <channel source="ccswitchboard" topic="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has forwarded_from_general_message_id, these are the owner\'s words relayed from the General topic. If the tag has redelivered="true", this session restarted after the message was handed over and it may have seen it already: look for it in your conversation first; if you already answered or acted, do not repeat it; if unsure whether an action with consequences was done, ask the owner. Reply with the reply tool — the reply always goes to this topic, there is no chat or topic to pass. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings. react and edit_message only work on messages of this topic.',
       '',
@@ -325,7 +330,7 @@ function connect(): void {
 
   s.on('connect', () => {
     log('connected', { broker: BROKER, keyed: key != null })
-    const hello: Hello = { t: 'hello', v: PROTOCOL_VERSION, ...(key ? { key } : {}) }
+    const hello: Hello = { t: 'hello', v: PROTOCOL_VERSION, ...(key ? { key } : {}), instance: INSTANCE, caps: ['ping', 'redelivery'] }
     s.write(encode(hello))
   })
   s.on('data', (chunk: string) => {
@@ -358,6 +363,11 @@ function connect(): void {
         case 'event':
           onEvent(m as InboundEvent)
           break
+        case 'ping': {
+          const nonce = (m as { nonce?: unknown }).nonce
+          if (typeof nonce === 'string') s.write(encode({ t: 'pong', nonce }))
+          break
+        }
         case 'unbound': {
           const reason = String((m as { reason?: unknown }).reason ?? '') || 'unbound'
           log('unbound', { reason, mode: welcome?.mode })
@@ -541,6 +551,7 @@ async function deliver(ev: InboundEvent): Promise<void> {
       : {}),
     ...(ev.forwarded_from_general ? { forwarded_from_general_message_id: String(ev.forwarded_from_general.message_id) } : {}),
     ...(ev.reply_to ? { reply_to_message_id: String(ev.reply_to.message_id) } : {}),
+    ...(ev.redelivered ? { redelivered: 'true' } : {}),
   }
 
   await mcp.notification({ method: 'notifications/claude/channel', params: { content: ev.text, meta } })
