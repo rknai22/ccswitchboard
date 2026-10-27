@@ -26,6 +26,9 @@ export type Config = {
   projects_root: string
   claude_cmd: string
   usage_file?: string
+  /** heal a live Claude whose plugin died (/mcp → Reconnect); off until the
+   *  external ccsb-mcp-heal timer is switched off — only one healer at a time */
+  heal: boolean
   timezone: string
   digest_at: string
 }
@@ -46,6 +49,7 @@ const DEFAULTS: Config = {
   orca: 'orca',
   projects_root: '~/projects',
   claude_cmd: 'claude --channels plugin:ccswitchboard@ccswitchboard --dangerously-skip-permissions',
+  heal: false,
   timezone: 'Europe/Moscow',
   digest_at: '10:00',
 }

@@ -27,12 +27,24 @@
 //   INV: closed topics are never (re)started; folders are never deleted.
 //   INV: a folder is trusted (~/.claude.json) only when it sits directly in
 //        projects_root — the broker never vouches for folders it did not make.
+//   INV: a live Claude whose shim is gone (alive_unreachable / blocked_alive)
+//        is healed with /mcp → Reconnect typed into its only terminal when it
+//        looks idle (config.heal; see heal.ts) — never closed: after
+//        healTiming.maxFails failures the owner gets a Restart button in
+//        General, and only that press closes the terminal (the one named in
+//        the button) and relaunches with --resume.
+//   INV: a topic's terminal is created in the topic's own Orca project
+//        (id:<repo-id>::<cwd>): by path, Orca files a folder that is a git
+//        worktree of another repo under that other project.
 //   INV: all session-machine commands go through runOnSessionHost as argv; the
 //        topic key appears only inside the terminal command (accepted by the
 //        spec: topics are not isolated from each other), never in logs.
 
 import { readFileSync } from 'fs'
+import type { Update } from 'grammy/types'
+import { randomBytes } from 'crypto'
 import type { BrokerContext, BrokerModule } from './context.ts'
+import { HEAL_PY, healDecision, healTiming, parseHeal, repoIdFor, type HealState } from './heal.ts'
 import { expandHome, initRunner, runOnSessionHost, sessionHome, type RunResult } from './runner.ts'
 import { t } from './strings.ts'
 
@@ -413,6 +425,7 @@ type Census = {
   ours: { handle: string; tabId?: string }[]
   /** other terminals in the topic folder — the owner's, or ours unrecognisable */
   others: number
+  othersHandles: string[]
 }
 
 async function census(name: string, cwd: string): Promise<Census> {
@@ -421,13 +434,13 @@ async function census(name: string, cwd: string): Promise<Census> {
   const j = parseJson(r.stdout)
   if (r.code !== 0 || j === undefined || j?.ok === false) {
     c.log('terminal_list_failed', { topic: name, err: orcaError(r) })
-    return { listOk: false, ours: [], others: 0 }
+    return { listOk: false, ours: [], others: 0, othersHandles: [] }
   }
   if (!Array.isArray(j?.result?.terminals)) c.log('terminal_list_shape', { keys: Object.keys(j ?? {}).join(',') })
   const hist = history(name)
   const handles = new Set(hist.map(x => x.handle).filter(Boolean))
   const tabs = new Set(hist.map(x => x.tabId).filter(Boolean))
-  const out: Census = { listOk: true, ours: [], others: 0 }
+  const out: Census = { listOk: true, ours: [], others: 0, othersHandles: [] }
   for (const x of terminalsOf(j)) {
     if (typeof x?.handle !== 'string') continue
     const inFolder = normPath(x.worktreePath) === normPath(cwd)
@@ -438,6 +451,7 @@ async function census(name: string, cwd: string): Promise<Census> {
       if (!handles.has(x.handle)) remember(name, { handle: x.handle, ...(tabId ? { tabId } : {}) })
     } else if (inFolder) {
       out.others++
+      out.othersHandles.push(x.handle)
     }
   }
   return out
@@ -492,6 +506,11 @@ if os.path.isdir("/proc/self"):
         try: exe = os.readlink("/proc/%s/exe" % p)
         except Exception: exe = ""
         rec = {"pid": int(p), "comm": comm[:32]}
+        try:
+            start = int(open("/proc/%s/stat" % p).read().rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
+            rec["age"] = int(float(open("/proc/uptime").read().split()[0]) - start)
+        except Exception:
+            pass
         if prog in names(argv[0] if argv else "", argv[1] if len(argv) > 1 else "", exe) or comm == prog[:15]:
             claude.append(rec)
         else:
@@ -524,7 +543,8 @@ export function programOf(cmd: string): string {
   return ''
 }
 
-type KeyProcs = { n: number | null; claude: { pid: number; comm: string }[]; others: { pid: number; comm: string }[]; othersTotal: number }
+type KeyProc = { pid: number; comm: string; age?: number }
+type KeyProcs = { n: number | null; claude: KeyProc[]; others: KeyProc[]; othersTotal: number }
 
 /** Live Claude processes holding the topic's key (n: null when unknown). */
 async function keyProcesses(key: string): Promise<KeyProcs> {
@@ -532,7 +552,11 @@ async function keyProcesses(key: string): Promise<KeyProcs> {
     input: key, timeoutMs: CMD_TIMEOUT_MS, label: 'key_processes',
   })
   const j = parseJson(r.stdout)
-  const list = (v: unknown) => (Array.isArray(v) ? v.filter(x => typeof x?.pid === 'number').map(x => ({ pid: x.pid as number, comm: String(x.comm ?? '').slice(0, 32) })) : [])
+  const list = (v: unknown): KeyProc[] => (Array.isArray(v)
+    ? v.filter(x => typeof x?.pid === 'number').map(x => ({
+      pid: x.pid as number, comm: String(x.comm ?? '').slice(0, 32), ...(typeof x.age === 'number' ? { age: x.age as number } : {}),
+    }))
+    : [])
   if (r.code !== 0 || !j || typeof j !== 'object') return { n: null, claude: [], others: [], othersTotal: 0 }
   return {
     n: typeof j.n === 'number' && Number.isInteger(j.n) ? j.n : null,
@@ -578,13 +602,118 @@ function blockedNotice(name: string, cwd: string, alive: boolean): void {
   void c.notifyGeneral(t(c.config.lang, alive ? 'session_blocked_alive' : 'session_blocked_unknown', { name, cwd }))
 }
 
+// ---- heal -----------------------------------------------------------------------------
+
+/** The topic's live Claude has no shim. Count the miss; when healDecision
+ *  says so, type /mcp → Reconnect into its only terminal and wait for the shim;
+ *  after too many failures ask the owner with a Restart button. True = the
+ *  shim is back. */
+async function heal(name: string, cen: Census, kp: KeyProcs): Promise<boolean> {
+  const c = ctx()
+  const term = kp.claude.length !== 1
+    ? undefined
+    : cen.ours.length === 1 ? cen.ours[0]!.handle
+    : !cen.ours.length && cen.othersHandles.length === 1 ? cen.othersHandles[0]
+    : undefined
+  if (!term) {
+    c.log('heal_skipped', { topic: name, claude: kp.claude.length, ours: cen.ours.length, others: cen.others })
+    return false
+  }
+  const st: HealState = parseHeal(c.store.get(k(name, 'heal')))
+  st.strikes++
+  const now = Date.now()
+  const what = healDecision(st, kp.claude[0]!.age ?? null, now)
+  if (what === 'ask_owner') {
+    st.askedAt = now
+    c.store.set(k(name, 'heal'), JSON.stringify(st))
+    await askRestart(name, term)
+    return false
+  }
+  if (what === 'wait') {
+    c.store.set(k(name, 'heal'), JSON.stringify(st))
+    return false
+  }
+  st.lastAt = now
+  c.store.set(k(name, 'heal'), JSON.stringify(st))
+  const r = await runOnSessionHost(['python3', '-c', HEAL_PY, c.config.orca, term], { timeoutMs: 90_000, label: 'heal' })
+  const j = parseJson(r.stdout)
+  let ok = false
+  if (j?.ok === true) {
+    for (const end = Date.now() + healTiming.connectWaitMs; Date.now() < end && !ok;) {
+      await new Promise(res => setTimeout(res, 1000))
+      ok = c.isConnected(name)
+    }
+  }
+  c.log('heal', { topic: name, sent: j?.ok === true, why: String(j?.why ?? `exit ${r.code}`), connected: ok })
+  // "busy" or a changed screen is not a failed heal — just not now.
+  if (ok) c.store.del(k(name, 'heal'))
+  else if (j?.ok === true || !['busy', 'changed'].includes(String(j?.why))) {
+    st.fails++
+    c.store.set(k(name, 'heal'), JSON.stringify(st))
+  }
+  return ok
+}
+
+const RESTART_TTL_MS = 24 * 3600_000
+
+async function askRestart(name: string, handle: string): Promise<void> {
+  const c = ctx()
+  const nonce = randomBytes(6).toString('base64url')
+  c.store.set(k(name, 'restart'), JSON.stringify({ nonce, handle, expires: Date.now() + RESTART_TTL_MS }))
+  const markup = { inline_keyboard: [[{ text: t(c.config.lang, 'restart_button', { name }), callback_data: `ccsr:${name}:${nonce}` }]] }
+  c.log('restart_asked', { topic: name })
+  await c.tg.send('general', t(c.config.lang, 'heal_failed_ask', { name }), { reply_markup: markup })
+    .catch(e => c.log('restart_ask_failed', { topic: name, err: e instanceof Error ? e.message : String(e) }))
+}
+
+/** The owner pressed Restart: close exactly the terminal named in the button
+ *  (if it is still there) and relaunch with --resume. */
+export async function onRestartCallback(cq: NonNullable<Update['callback_query']>): Promise<void> {
+  const c = ctx()
+  const answer = (key?: 'callback_done' | 'callback_expired' | 'restart_gone') =>
+    c.tg.api()?.answerCallbackQuery(cq.id, key ? { text: t(c.config.lang, key, {}) } : {}).catch(() => {})
+  const m = /^ccsr:([a-z0-9-]{1,32}):([A-Za-z0-9_-]+)$/.exec(cq.data ?? '')
+  const owner = c.owner()
+  if (!m || !owner || cq.from.id !== owner.owner_id) {
+    c.log('restart_ignored', { from: cq.from.id })
+    return void (await answer())
+  }
+  const name = m[1]!
+  let req: { nonce?: string; handle?: string; expires?: number } = {}
+  try { req = JSON.parse(c.store.get(k(name, 'restart')) ?? '{}') } catch {}
+  const row = c.store.topic(name)
+  if (!row?.cwd || row.state !== 'open' || req.nonce !== m[2] || !req.handle || (req.expires ?? 0) < Date.now()) {
+    c.log('restart_stale', { topic: name })
+    return void (await answer('callback_expired'))
+  }
+  c.store.del(k(name, 'restart'))
+  const closed = await serial(name, async () => {
+    const cen = await census(name, row.cwd!)
+    const there = cen.ours.some(x => x.handle === req.handle) || cen.othersHandles.includes(req.handle!)
+    if (!there) {
+      c.log('restart_gone', { topic: name })
+      await answer('restart_gone')
+      return false
+    }
+    await answer('callback_done')
+    await closeTerminals(name, [{ handle: req.handle! }])
+    c.store.set(k(name, 'force_relaunch'), 1)
+    c.store.del(k(name, 'launch_at'), k(name, 'heal'))
+    c.log('restart_by_owner', { topic: name })
+    return true
+  })
+  if (!closed) return
+  const res = await ensure(name)
+  c.log('restart_ensure', { topic: name, launched: res.launched, reason: res.reason })
+}
+
 // ---- ensure -------------------------------------------------------------------------
 
 export type EnsureResult = {
   launched: boolean
   /** connected | recent_launch | closed | unknown_topic | not_configured |
    *  folder_failed | orca_down | orca_settling | alive_unreachable |
-   *  blocked_alive | blocked_unknown | create_failed | launched */
+   *  blocked_alive | blocked_unknown | create_failed | launched | healed */
   reason: string
   cwd?: string
   prepare?: PrepareResult
@@ -659,6 +788,8 @@ async function ensureNow(name: string): Promise<EnsureResult> {
     c.store.set(k(name, 'fails'), 0)
     // Pids and comms only (never the key) — enough for the owner to find them.
     c.log('session_alive_unreachable', { topic: name, ours: cen.ours.length, others: cen.others, claude_pids: procsField(kp.claude) })
+    const healed = c.config.heal ? await heal(name, cen, kp) : false
+    if (healed) return { launched: false, reason: 'healed', cwd, prepare }
     if (cen.ours.length) aliveNotice(name, cwd)
     else blockedNotice(name, cwd, true)
     return { launched: false, reason: cen.ours.length ? 'alive_unreachable' : 'blocked_alive', cwd, prepare }
@@ -707,7 +838,10 @@ async function ensureNow(name: string): Promise<EnsureResult> {
   if (sid && !resume) c.log('launch_fresh', { topic: name, had_session_id: true })
 
   const cmd = `CCSB_KEY=${row.key} ${c.config.claude_cmd}${resume ? ` --resume ${sid}` : ''}`
-  const r = await orca(['terminal', 'create', '--worktree', `path:${cwd}`, '--title', `tg:${name}`, '--command', cmd, '--json'], 'orca_terminal_create')
+  const repoId = repoIdFor(parseJson((await orca(['repo', 'list', '--json'], 'orca_repo_list')).stdout), cwd)
+  if (!repoId) c.log('repo_id_missing', { topic: name })
+  const where = repoId ? `id:${repoId}::${cwd}` : `path:${cwd}`
+  const r = await orca(['terminal', 'create', '--worktree', where, '--title', `tg:${name}`, '--command', cmd, '--json'], 'orca_terminal_create')
   const j = parseJson(r.stdout)
   if (r.code !== 0 || j === undefined || j?.ok === false) {
     const err = orcaError(r, row.key)
@@ -787,6 +921,7 @@ export async function watchdogTick(): Promise<void> {
           c.log('session_up', { topic: name, since: c.connectedSince(name) })
         }
         c.store.set(k(name, 'fails'), 0)
+        c.store.del(k(name, 'heal'))
         const pending = num(c.store.get(k(name, 'sid_pending')))
         if (pending && row.cwd) await discoverSessionId(name, row.cwd, pending)
         continue
@@ -802,7 +937,7 @@ export async function watchdogTick(): Promise<void> {
       if (!res.launched) c.log('ensure_skipped', { topic: name, reason: res.reason })
       // These say nothing about the session's health (a launch just happened,
       // it reconnected meanwhile, the topic went away): no state change.
-      if (['recent_launch', 'connected', 'closed', 'unknown_topic', 'not_configured'].includes(res.reason)) continue
+      if (['recent_launch', 'connected', 'closed', 'unknown_topic', 'not_configured', 'healed'].includes(res.reason)) continue
       // Alive but cut off from the broker is not "down": ensure already told
       // the owner which it is.
       const st = res.reason === 'alive_unreachable' ? 'unreachable' : 'down'
@@ -829,6 +964,11 @@ export const sessionsModule: BrokerModule = {
     tickTimer = setInterval(() => void watchdogTick(), timing.tickMs)
     // A module has no stop hook; do not keep a stopping broker alive.
     tickTimer.unref?.()
+  },
+  async onUpdate(u) {
+    if (!u.callback_query?.data?.startsWith('ccsr:')) return false
+    await onRestartCallback(u.callback_query)
+    return true
   },
   async onLocked(c) {
     ctxRef ??= c
