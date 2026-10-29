@@ -17,7 +17,7 @@
 import { Api, GrammyError, HttpError, InputFile } from 'grammy'
 import type { Update } from 'grammy/types'
 import { MAX_DOWNLOAD_BYTES, MAX_TEXT_CHUNK, MAX_UPLOAD_BYTES, type FilePayload, type Format } from '../../plugin/protocol.ts'
-import { AS_FILE_CHARS, mdChunks, mdToHtml } from './markdown.ts'
+import { AS_FILE_CHARS, RICH_MAX_CHARS, mdChunks, mdToHtml, mdToRich, wantsRich } from './markdown.ts'
 import { botIdOf, type Config } from './config.ts'
 import { log } from './context.ts'
 import type { Store } from './store.ts'
@@ -51,6 +51,13 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 /** Telegram refused the entities/HTML of a message. */
 export function isParseError(e: unknown): boolean {
   return e instanceof GrammyError && e.error_code === 400 && /can't parse entities|unsupported start tag|can't find end/i.test(e.description)
+}
+
+/** Telegram refused a rich message as such (old API root, a limit, its
+ *  markdown): the caller sends the plain HTML way instead. Rate limits and
+ *  network errors are not this — they fail the same either way. */
+export function isRichRefused(e: unknown): boolean {
+  return e instanceof GrammyError && (e.error_code === 400 || e.error_code === 404)
 }
 
 export function chunk(text: string, limit = MAX_TEXT_CHUNK): string[] {
@@ -252,6 +259,21 @@ export class Telegram {
     }
     const parse = opts.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : md ? { parse_mode: 'HTML' as const } : {}
     const replyTo = opts.reply_to !== undefined ? { reply_parameters: { message_id: opts.reply_to } } : {}
+    // A table or a heading: one rich message (Telegram's markdown renders
+    // both); refused → the HTML chunks below, as before.
+    if (md && text.length <= RICH_MAX_CHARS && wantsRich(text)) {
+      const m = await this.enqueue(chatId, true, api => api.sendRichMessage(chatId, { markdown: mdToRich(text) }, {
+        ...base, ...replyTo, ...(opts.reply_markup ? { reply_markup: opts.reply_markup as never } : {}),
+      })).catch(e => {
+        if (!isRichRefused(e)) throw new Error(`reply failed after 0 of 1 chunk(s) sent: ${describeError(e)}`)
+        log('tg', 'rich_fallback', { len: text.length, err: describeError(e).slice(0, 120) })
+        return null
+      })
+      if (m) {
+        opts.onSent?.(m.message_id)
+        return [m.message_id, ...await this.sendFiles(chatId, decoded, base, replyTo, opts.onSent, 1)]
+      }
+    }
     const plain = !text.length ? [] : md ? mdChunks(text) : chunk(text)
     const chunks = md ? plain.map(mdToHtml) : plain
     const ids: number[] = []
@@ -275,6 +297,14 @@ export class Telegram {
     } catch (e) {
       throw new Error(`reply failed after ${ids.length} of ${chunks.length} chunk(s) sent: ${describeError(e)}`)
     }
+    return ids.concat(await this.sendFiles(chatId, decoded, base, replyTo, opts.onSent, ids.length))
+  }
+
+  private async sendFiles(
+    chatId: number, decoded: { name: string; buf: Buffer }[], base: object, replyTo: object,
+    onSent: ((id: number) => void) | undefined, before: number,
+  ): Promise<number[]> {
+    const ids: number[] = []
     for (const f of decoded) {
       const ext = (f.name.split('.').pop() ?? '').toLowerCase()
       const input = new InputFile(f.buf, f.name)
@@ -285,9 +315,9 @@ export class Telegram {
             : api.sendDocument(chatId, input, { ...base, ...replyTo }),
         )
         ids.push(m.message_id)
-        opts.onSent?.(m.message_id)
+        onSent?.(m.message_id)
       } catch (e) {
-        throw new Error(`file ${f.name} failed after ${ids.length} message(s) sent: ${describeError(e)}`)
+        throw new Error(`file ${f.name} failed after ${before + ids.length} message(s) sent: ${describeError(e)}`)
       }
     }
     return ids

@@ -105,7 +105,7 @@ const FORMAT_PROP = {
   type: 'string',
   enum: ['markdown', 'text', 'markdownv2'],
   description:
-    "Rendering mode. Default 'markdown': **bold**, *italic*, ~~strike~~, `code`, ```fenced code```, [text](https://url), '# heading', '- item', '> quote', and '>> quote' for a collapsed quote (put long details there). No escaping needed; underscores are never markup. Text over 8000 chars is sent as its start plus the whole text as reply.md. 'text': plain. 'markdownv2': raw Telegram MarkdownV2 (caller escapes).",
+    "Rendering mode. Default 'markdown': **bold**, *italic*, ~~strike~~, `code`, ```fenced code```, [text](https://url), '# heading', '- item', '> quote', and '>> quote' for a collapsed quote (put long details there). A GFM table (| a | b | + |---|---|) or a '# heading' makes the reply one Telegram rich message, where tables and headings render as such. No escaping needed; underscores are never markup. Text over 8000 chars is sent as its start plus the whole text as reply.md. 'text': plain. 'markdownv2': raw Telegram MarkdownV2 (caller escapes).",
 }
 
 const TOOL_DEFS: Record<ToolName, { name: ToolName; description: string; inputSchema: Record<string, unknown> }> = {

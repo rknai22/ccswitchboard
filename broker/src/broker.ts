@@ -36,8 +36,8 @@ import { BrokerServer } from './server.ts'
 import { Setup } from './setup.ts'
 import { Store, type StoredEvent } from './store.ts'
 import { t } from './strings.ts'
-import { Telegram, describeError, isParseError, type AllowedUpdate } from './telegram.ts'
-import { mdChunks, mdToHtml } from './markdown.ts'
+import { Telegram, describeError, isParseError, isRichRefused, type AllowedUpdate } from './telegram.ts'
+import { RICH_MAX_CHARS, mdChunks, mdToHtml, mdToRich, wantsRich } from './markdown.ts'
 import { VOICE_KINDS, openaiKey, transcribe } from './voice.ts'
 import { commandOf } from './commands.ts'
 
@@ -533,14 +533,25 @@ export class Broker {
         const fmt = formatOf(a.format)
         const text = a.text as string
         if (fmt === 'markdown') {
+          const rich = () => this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, { markdown: mdToRich(text) }))
           // An edit is one message: the first chunk only, converted whole.
           const parts = mdChunks(text)
           const first = (parts[0] ?? text) + (parts.length > 1 ? '\n…' : '')
-          await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(first), { parse_mode: 'HTML' }))
+          const html = () => this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, mdToHtml(first), { parse_mode: 'HTML' }))
             .catch(e => {
               if (!isParseError(e)) throw e
               return this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, first.slice(0, MAX_TEXT_CHUNK)))
             })
+          const tryRich = text.length <= RICH_MAX_CHARS && wantsRich(text)
+          // Each way falls back to the other: the message may have been sent
+          // the other way, and Telegram may refuse to switch it.
+          await (tryRich ? rich() : html()).catch(e => {
+            if (!isRichRefused(e) || /not modified/i.test(e.description)) throw e
+            log('broker', 'edit_fallback', { to: tryRich ? 'html' : 'rich' })
+            if (!tryRich && text.length > RICH_MAX_CHARS) throw e
+            // The other way failing too: the first error says more.
+            return (tryRich ? html() : rich()).catch(() => { throw e })
+          })
         } else {
           const parse = fmt === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
           await this.tg.enqueue(chat, true, api => api.editMessageText(chat, id, text, parse))

@@ -18,7 +18,8 @@ Answer in the owner's language (the language of their messages).
   `message_id`) as the work moves on. Silent replies keep «typing…» on; the final, loud
   `reply` ends it.
 - Replies are markdown by default (**bold**, `code`, fences, `> quote`); put long details
-  in a collapsed `>> quote` or a file. Underscores are never markup.
+  in a collapsed `>> quote` or a file. Underscores are never markup. Tables
+  (`| a | b |` + `|---|---|`) and `#` headings render as such (a Telegram rich message).
 - `/status`, `/tasks`, `/restart`, `/help` in the topic are answered by the bot itself;
   they never reach you.
 - Finish with a separate `reply` (edits do not notify the owner; a new message does).

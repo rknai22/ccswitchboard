@@ -109,7 +109,8 @@ export type Pong = { t: 'pong'; nonce: string }
 
 export type FilePayload = { name: string; data_b64: string }
 
-/** markdown: the broker's small dialect → Telegram HTML (see broker/src/markdown.ts). */
+/** markdown: the broker's small dialect → Telegram HTML, or a rich message when it
+ *  holds a table or a heading (see broker/src/markdown.ts). */
 export type Format = 'text' | 'markdownv2' | 'markdown'
 
 export type CallArgs = {

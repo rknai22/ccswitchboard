@@ -84,8 +84,10 @@ Licensed under Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
     stays up until the session's next non-silent reply (30 min at most).
   - Replies are markdown by default, sent as Telegram HTML (`**bold**`,
     `*italic*`, code, links, quotes, `>>` collapsed quotes); text over 8000
-    characters goes as its start plus `reply.md`. `reply.silent` sends without
-    a sound, for progress lines.
+    characters goes as its start plus `reply.md`. A reply or edit with a table
+    or a `#` heading goes as one Telegram rich message (`sendRichMessage`,
+    Bot API 10.1) so both render; if Telegram refuses it, the HTML way.
+    `reply.silent` sends without a sound, for progress lines.
   - A forwarded message carries its author (`forwarded_from`), a quote-reply
     the quoted text (`reply_to_text`).
   - `/status`, `/restart`, `/help` (the bot's command menu in the group) are

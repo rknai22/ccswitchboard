@@ -12,7 +12,8 @@ Answer in the owner's language (the language of their messages).
 - Reply only with the `reply` tool; terminal output never reaches Telegram.
 - For longer work send `⚙️ Now: <what you are doing>` with `reply` and `silent: true`, keep
   it current with `edit_message`; finish with a new, loud `reply`. Replies are markdown by
-  default; long details go in a collapsed `>> quote` or a file.
+  default; long details go in a collapsed `>> quote` or a file. Tables and `#` headings
+  render as such (a Telegram rich message).
 
 ## What you do
 

@@ -3,6 +3,10 @@
 //   IN:  a session's reply text in the small markdown dialect below.
 //   OUT: Telegram HTML (parse_mode HTML) split into chunks that each fit one
 //        message; mdChunks() keeps code fences whole where it can.
+//        wantsRich()/mdToRich(): text with a table or a heading goes as one
+//        rich message (sendRichMessage, Bot API 10.1) in Telegram's own
+//        markdown; mdToRich escapes what that dialect would read as markup
+//        and ours does not ($ formulas, underscores, ==, ||, HTML tags).
 //   INV: every character outside our tags is HTML-escaped; a chunk Telegram
 //        still rejects is resent as plain text by the caller.
 //   INV: underscores are never markup — file and variable names stay intact.
@@ -137,5 +141,67 @@ export function mdChunks(md: string, limit = CHUNK_MD): string[] {
   if (fence !== null) fence = null
   flush()
   return out.length ? out : ['']
+}
+/** Rich messages hold up to 32768 characters (Bot API "Rich Message Limits"). */
+export const RICH_MAX_CHARS = 32768
+
+const TABLE_ROW = /^\s*\|.*\|\s*$/
+const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/
+const HEADING = /^#{1,6}\s+\S/
+
+/** Every line, flagged when it belongs to a code fence (fence lines included). */
+function prose(md: string): { line: string; code: boolean }[] {
+  const out: { line: string; code: boolean }[] = []
+  let inFence = false
+  for (const line of md.split('\n')) {
+    if (inFence) {
+      out.push({ line, code: true })
+      if (FENCE_END.test(line)) inFence = false
+    } else if (FENCE.test(line)) {
+      out.push({ line, code: true })
+      inFence = true
+    } else out.push({ line, code: false })
+  }
+  return out
+}
+
+/** A GFM table or a heading outside code: plain Telegram HTML has neither. */
+export function wantsRich(md: string): boolean {
+  const ls = prose(md)
+  return ls.some((l, i) => !l.code && (HEADING.test(l.line)
+    || (TABLE_ROW.test(l.line) && i + 1 < ls.length && !ls[i + 1]!.code && TABLE_SEP.test(ls[i + 1]!.line))))
+}
+
+function richInline(s: string, inTable: boolean): string {
+  const codes: string[] = []
+  s = s.replace(/`([^`\n]+)`/g, m => `\u0000${codes.push(m) - 1}\u0000`)
+  s = s.replace(/\\(?=[_$<=|])/g, '\\\\')
+  s = s.replace(/[_$<]/g, '\\$&').replace(/==/g, '\\=\\=')
+  if (!inTable) s = s.replace(/\|\|/g, '\\|\\|')
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)]!)
+}
+
+/** Our dialect → Telegram rich markdown: the same text, with everything the
+ *  rich dialect would read as extra markup escaped, and ">>" collapsed quotes
+ *  as <details> (rich markdown has no expandable quote). */
+export function mdToRich(md: string): string {
+  const ls = prose(md.replace(/[\u0000\u0001]/g, ''))
+  const out: string[] = []
+  for (let i = 0; i < ls.length; i++) {
+    const { line, code } = ls[i]!
+    if (code) {
+      out.push(line)
+      continue
+    }
+    if (/^>> ?/.test(line)) {
+      const body = [line.replace(/^>> ?/, '')]
+      while (i + 1 < ls.length && !ls[i + 1]!.code && /^>> ?/.test(ls[i + 1]!.line)) body.push(ls[++i]!.line.replace(/^>> ?/, ''))
+      const [summary, ...rest] = body.map(b => richInline(b, false))
+      out.push(rest.length ? `<details><summary>${summary}</summary>\n\n${rest.join('\n')}\n\n</details>` : `>${summary}`)
+      continue
+    }
+    out.push(richInline(line, TABLE_ROW.test(line)))
+  }
+  return out.join('\n')
 }
 // === GRACE END_BLOCK: broker_markdown =========================================
