@@ -313,10 +313,19 @@ machine to one topic.
 
 ### Usage poller (for the pinned limits message)
 
-`usage/usage-poll.ts` runs every 5 minutes as a systemd **user** unit of the
-user Claude Code is signed in as. It asks Anthropic for the current
-5-hour/weekly utilisation with that user's Claude login and writes
-`usage_file`.
+The Claude limits come from Claude Code's own status line — no login token is
+read and nothing is fetched. `usage/statusline.sh` is a `statusLine` command:
+on every status line update it keeps the `rate_limits` part (5-hour and weekly,
+sent to Pro/Max subscribers) in `~/.local/state/ccswitchboard/statusline.json`
+and hands the payload on to the status line that was there before (Orca's
+hook, or the command in `CCSB_STATUSLINE_NEXT`). It needs `jq`.
+
+```json
+"statusLine": { "type": "command", "command": "/bin/sh $HOME/opt/ccswitchboard/usage/statusline.sh" }
+```
+
+`usage/usage-poll.ts` runs every 5 minutes as a systemd **user** unit and turns
+that file into `usage_file`:
 
 ```sh
 cp usage/ccswitchboard-usage.{service,timer} ~/.config/systemd/user/   # adjust the bun and checkout paths inside
@@ -326,12 +335,12 @@ loginctl enable-linger "$USER"
 
 It also reads the Codex CLI's last `rate_limits` event from
 `~/.codex/sessions/**/rollout-*.jsonl` (the ChatGPT limits Orca shows) into a
-`codex` field; a window whose reset has passed shows 0 %.
+`codex` field. In both, a window whose reset has passed shows 0 %.
 
-The endpoint is **undocumented** (it is what `/usage` uses). If Anthropic
-changes it, the pin shows «no data» — never a made-up 0 %. The poller never
-refreshes the login token, so while no session runs for a while, the pin says
-the data is stale.
+The numbers move only while some session works. The pin shows when they were
+seen and says they are stale after 15 minutes; with no status line data at all
+it shows «no data» — never a made-up 0 %. Team accounts get no `rate_limits`
+in the status line, so their pin stays empty.
 
 ## Setup and reset
 
@@ -431,7 +440,7 @@ Be clear about what this protects and what it does not.
 - **Not verified against a live Telegram:** what Telegram answers for a
   deleted topic, `is_topic_message` in General, and the setup events on
   enabling topics.
-- The usage endpoint is undocumented (see above).
+- Claude limits update only while a session is active (see the usage poller).
 - **Delivery is at least once.** After a crash a new session process gets the
   last 30 minutes again, marked `redelivered`; the session checks its
   conversation before acting.
